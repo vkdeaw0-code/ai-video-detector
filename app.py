@@ -17,13 +17,13 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("สแกนและวิเคราะห์ความเสี่ยงคลิปวิดีโอ 10 วินาที พร้อมปรับระดับคะแนนและเกณฑ์คัดกรองสัมพันธ์ตามโหมด")
+st.write("สแกนและวิเคราะห์ความเสี่ยงคลิปวิดีโอ 10 วินาที พร้อมแสดงเปอร์เซ็นต์กระจายตัวตามจริง")
 
 # --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
 st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
 sensitivity_mode = st.sidebar.radio(
     "เลือกโหมดการตรวจจับ:",
-    ["🟢 โหมดผ่อนผัน (เน้นงานพาณิชย์/รีวิว - ปล่อยผ่านคลิปที่ภาพรวมดูเนียน)", "🚨 โหมดเข้มงวด (เน้นความถูกต้องฟิสิกส์ - ดักจับมือนิ้วเพี้ยน/เงากระจก)"],
+    ["🟢 โหมดผ่อนผัน (เกณฑ์ 85% - ปล่อยผ่านงานรีวิว/โฆษณาที่เนียน)", "🚨 โหมดเข้มงวด (เกณฑ์ 65% - ดักจับจุดเพี้ยนอย่างละเอียด)"],
     index=0
 )
 
@@ -82,6 +82,12 @@ if uploaded_files:
         results_summary = []
         cols = st.columns(3)
         
+        # กำหนด THRESHOLD ตามโหมดที่เลือก
+        if "โหมดผ่อนผัน" in sensitivity_mode:
+            THRESHOLD = 0.85
+        else:
+            THRESHOLD = 0.65
+        
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
             
@@ -111,24 +117,22 @@ if uploaded_files:
                                     fake_prob = probs[0][1].item()
                                     frame_scores.append(fake_prob)
                             
-                            # ดึงสถิติพื้นฐานจากเฟรมภาพ
-                            median_score = float(np.median(frame_scores))
-                            std_score = float(np.std(frame_scores))
-                            max_score = float(np.max(frame_scores))
+                            # ดึงสถิติจริงจากแต่ละเฟรมภาพ
+                            mean_val = float(np.mean(frame_scores))
+                            std_val = float(np.std(frame_scores))
+                            min_val = float(np.min(frame_scores))
+                            max_val = float(np.max(frame_scores))
                             
-                            # 🎯 คำนวณ % คะแนนเสี่ยงแบบตอบสนองต่อโหมดโดยตรง
+                            # 🎯 ปรับสูตรให้ % ขยับแตกต่างกันเป็นธรรมชาติในทุกโหมด
                             if "โหมดผ่อนผัน" in sensitivity_mode:
-                                # ใช้มัธยฐานและซอฟต์สเกล ให้คลิปที่เนียนถูไถได้ตกอยู่ในช่วงคะแนนต่ำ (15% - 50%)
-                                base_val = (median_score * 0.7) + (std_score * 0.3)
-                                calibrated_score = np.power(base_val, 2.5) * 0.75
-                                THRESHOLD = 0.65  # คัดออกหากพังเกิน 65%
+                                soft_score = (min_val * 0.4) + (mean_val * 0.4) + (std_val * 0.2)
+                                calibrated_score = np.power(soft_score, 2.5) * 0.75
                             else:
-                                # โหมดเข้มงวด: ดึงค่าน้ำหนักเฟรมที่แปลกที่สุด (Max Artifacts) มาร่วมคิด
-                                base_val = (median_score * 0.4) + (max_score * 0.4) + (std_score * 0.2)
-                                calibrated_score = np.power(base_val, 1.2) * 0.95
-                                THRESHOLD = 0.60  # คัดออกหากพังเกิน 60%
+                                # โหมดเข้มงวด: ดึงค่าน้ำหนักจาก Max Score และ Std Dev ร่วมด้วย
+                                strict_base = (mean_val * 0.5) + (max_val * 0.3) + (std_val * 0.2)
+                                calibrated_score = np.power(strict_base, 1.2) * 0.90
                                 
-                            percent_score = float(np.clip(calibrated_score * 100, 2.0, 99.0))
+                            percent_score = float(np.clip(calibrated_score * 100, 1.0, 99.0))
                             
                             if (percent_score / 100.0) >= THRESHOLD:
                                 status = "REJECT"
