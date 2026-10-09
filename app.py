@@ -1,0 +1,118 @@
+import streamlit as st
+import cv2
+import torch
+import timm
+import mediapipe as mp
+import numpy as np
+import tempfile
+import os
+from PIL import Image
+from torchvision import transforms
+
+# --- 1. SET UP PAGE CONFIG ---
+st.set_page_config(
+    page_title="ระบบตรวจจับคลิปวิดีโอ AI",
+    page_icon="🎬",
+    layout="centered"
+)
+
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที เพื่อวิเคราะห์โครงสร้างใบหน้าและสแกนหาความผิดปกติจาก Deepfake / GenAI")
+
+# --- 2. LOAD MODELS ---
+@st.cache_resource
+def load_detection_models():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
+    model = model.to(device)
+    model.eval()
+    
+    mp_face_detection = mp.solutions.face_detection
+    face_detector = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+    
+    return model, face_detector, device
+
+model, face_detector, device = load_detection_models()
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# --- 3. HELPER FUNCTIONS ---
+def extract_and_crop_faces(video_path, frame_interval=10):
+    cap = cv2.VideoCapture(video_path)
+    cropped_faces = []
+    count = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        if count % frame_interval == 0:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_detector.process(rgb_frame)
+            
+            if results.detections:
+                h, w, _ = frame.shape
+                for detection in results.detections:
+                    bbox = detection.location_data.relative_bounding_box
+                    xmin = max(0, int(bbox.xmin * w))
+                    ymin = max(0, int(bbox.ymin * h))
+                    width = int(bbox.width * w)
+                    height = int(bbox.height * h)
+                    
+                    xmax = min(w, xmin + width)
+                    ymax = min(h, ymin + height)
+                    
+                    face = rgb_frame[ymin:ymax, xmin:xmax]
+                    if face.shape[0] > 10 and face.shape[1] > 10:
+                        cropped_faces.append(face)
+        count += 1
+        
+    cap.release()
+    return cropped_faces
+
+# --- 4. WEB UI INTERFACE ---
+uploaded_file = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi)", type=["mp4", "mov", "avi"])
+
+if uploaded_file is not None:
+    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+    tfile.write(uploaded_file.read())
+    video_path = tfile.name
+    
+    st.video(uploaded_file)
+    
+    if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับ", type="primary"):
+        with st.spinner("กำลังวิเคราะห์เฟรมวิดีโอและสกัดโครงสร้างใบหน้า..."):
+            faces = extract_and_crop_faces(video_path)
+            
+            if not faces:
+                st.warning("⚠️ ไม่พบใบหน้าบุคคลในวิดีโอ ไม่สามารถประมวลผลได้")
+            else:
+                scores = []
+                with torch.no_grad():
+                    for face_np in faces:
+                        pil_img = Image.fromarray(face_np)
+                        input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                        output = model(input_tensor)
+                        probs = torch.softmax(output, dim=1)
+                        fake_prob = probs[0][1].item()
+                        scores.append(fake_prob)
+                
+                avg_score = float(np.mean(scores))
+                THRESHOLD = 0.70
+                percent_score = avg_score * 100
+                
+                st.subheader("📊 ผลการวิเคราะห์คลิปวิดีโอ:")
+                
+                if avg_score >= THRESHOLD:
+                    st.error(f"❌ **REJECT (คัดออก)** - ตรวจพบร่องรอย AI สูงถึง **{percent_score:.2f}%**")
+                else:
+                    st.success(f"✅ **PASS (ผ่าน)** - คลิปวิดีโอปกติ ค่าความผิดปกติ: **{percent_score:.2f}%**")
+                    
+                st.progress(min(int(percent_score), 100))
+                
+    os.unlink(video_path)
