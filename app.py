@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบประเมินคุณภาพคลิปวิดีโอ AI")
-st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% **ตรวจสอบความผิดปกติของอวัยวะ (จาง/หาย) และคุณภาพเสียงพูดอย่างสมดุล**")
+st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% **ปล่อยผ่านคลิป AI ที่คุณภาพใช้งานได้ จับผิดเฉพาะจุดบกพร่องรุนแรง (เช่น อวัยวะขาดหาย/ละลายชัดเจน)**")
 
 @st.cache_resource
 def load_detection_models():
@@ -97,7 +97,6 @@ def analyze_audio_and_lipsync(video_path):
         fft_data = np.abs(np.fft.rfft(data_float))
         fft_sum = np.sum(fft_data)
         
-        # เพิ่มความเข้มของการตรวจเสียง
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
@@ -112,7 +111,7 @@ def analyze_audio_and_lipsync(video_path):
                 audio_risk += 7.0 
                 
         if audio_risk >= 10.0:
-            audio_msg = "🔊 เสียงพูดเพี้ยน/ฟังไม่รู้เรื่อง"
+            audio_msg = "🔊 เสียงพูดเพี้ยนมาก/ฟังไม่รู้เรื่อง"
         elif audio_risk > 0:
             audio_msg = "🔊 พบการใช้เสียงสังเคราะห์ (AI Voice)"
         
@@ -173,33 +172,30 @@ if uploaded_files:
                                 mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
                                 
-                                # 💡 ปรับ Base Score ให้ขยับขึ้นเล็กน้อย (ประมาณ 20-50%)
-                                base_score = (median_prob * 30.0) + (mean_prob * 20.0)
+                                # 💡 1. ลด Base Score ให้เหลือสูงสุดแค่ 40% (คลิปเนียนๆ จะผ่านสบาย)
+                                base_score = (median_prob * 25.0) + (mean_prob * 15.0)
                                 
-                                # 💡 เกณฑ์จับผิดแบบสมดุล
-                                glitch_thresh = min(0.92, max(0.82, median_prob + 0.15))
+                                # 💡 2. ปรับเพดานจับผิดให้สูงปรี๊ด (ต้องมั่นใจว่าพังแน่ๆ ถึงจะหักคะแนน)
+                                glitch_thresh = min(0.96, max(0.90, median_prob + 0.25))
                                 
                                 glitch_penalty = 0.0
-                                defect_count = 0
                                 details_list = []
                                 
-                                # ตรวจสอบ 1: ต้นคลิปพัง
+                                # ตรวจสอบ 1: ต้นคลิปพัง (ลดโทษลงเหลือแค่ 5% ไม่ทำให้คลิปตก)
                                 early_probs = frame_scores[:6]
-                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 2:
-                                    defect_count += 1
-                                    glitch_penalty += 10.0
-                                    details_list.append("⚠️ รูปร่าง/แสงบิดเบี้ยวตั้งแต่ต้นคลิป")
+                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 3:
+                                    glitch_penalty += 5.0
+                                    details_list.append("จุดบกพร่องเล็กน้อยต้นคลิป")
                                 
-                                # ตรวจสอบ 2: อวัยวะหรือสินค้าผิดรูป (มือหาย/ตัวจาง)
+                                # ตรวจสอบ 2: อวัยวะขาดหาย/ตัววาร์ป (💡 จุดตาย! ถ้าเจอให้คะแนนพุ่งทันที +40%)
                                 avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
-                                morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.5)])
+                                morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 4.0)])
                                 
                                 if morph_count >= 2:
-                                    defect_count += 1
-                                    glitch_penalty += 25.0 # หักหนักขึ้นสำหรับมือหาย/ตัวจาง
-                                    details_list.append("⚠️ อวัยวะหรือสินค้าผิดรูป (มือหาย/ตัวจางวับ)")
+                                    glitch_penalty += 40.0 # งัดให้ตก 100%
+                                    details_list.append("⚠️ อวัยวะหรือสินค้าบิดเบี้ยว/ขาดหายชัดเจน")
                                 
-                                # ตรวจสอบ 3: ภาพละลายต่อเนื่อง
+                                # ตรวจสอบ 3: ภาพละลายต่อเนื่อง (ต้องละลายนานกว่า 1.3 วินาที ถึงจะหักคะแนน)
                                 suspect_frames = [1 if score > glitch_thresh else 0 for score in frame_scores]
                                 max_consecutive = 0
                                 current_consecutive = 0
@@ -210,12 +206,11 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                 
-                                if max_consecutive >= 5: # ละลายแช่เกือบ 1 วิ
-                                    defect_count += 1
+                                if max_consecutive >= 8: # ละลายนานมาก
                                     glitch_penalty += 15.0
-                                    details_list.append("⚠️ ภาพพื้นหลัง/วัตถุละลายต่อเนื่อง")
-                                elif max_consecutive >= 3: 
-                                    glitch_penalty += 5.0
+                                    details_list.append("ภาพพื้นหลังละลายต่อเนื่อง")
+                                elif max_consecutive >= 4: # ลดโทษกระตุกเล็กน้อยเหลือ 3%
+                                    glitch_penalty += 3.0
                                 
                                 # ตรวจสอบ 4: เสียง
                                 audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
@@ -224,15 +219,12 @@ if uploaded_files:
                                 if audio_msg:
                                     details_list.append(audio_msg)
                                         
-                                # กฎทวีคูณ (เจอของพังหลายอย่างพร้อมกัน)
-                                if defect_count >= 2:
-                                    glitch_penalty += 15.0
-                                        
+                                # ไม่มีการคูณคะแนนสะสมแล้ว (เพื่อป้องกันคลิปดีโดนเหมารวมจนตก)
                                 final_score = np.clip(base_score + glitch_penalty, 0.0, 100.0)
                                 
                                 # จัดการข้อความ
                                 if not details_list or (len(details_list) == 1 and "พบการใช้เสียงสังเคราะห์" in details_list[0]):
-                                    details = "คลิปวิดีโอสมบูรณ์ (อนุโลมการใช้ AI Voice)" if audio_risk > 0 else "คลิปวิดีโอสมจริง เป็นธรรมชาติ"
+                                    details = "วิดีโอสมบูรณ์ (อนุโลมการใช้ AI Voice)" if audio_risk > 0 else "วิดีโอสมจริง เป็นธรรมชาติ"
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                 
