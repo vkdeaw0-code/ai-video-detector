@@ -14,7 +14,7 @@ from PIL import Image
 from torchvision import transforms
 
 # ==========================================
-# 1. ตั้งค่าและเตรียมโมเดล
+# 1. ตั้งค่าและเตรียมโมเดล (คงเดิม)
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
@@ -23,7 +23,6 @@ st.write("✨ **Smart Tolerance System:** อนุโลมจุดผิด�
 @st.cache_resource
 def load_detection_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # ใช้ EfficientNet-B0 เพื่อความเร็ว (หากมีไฟล์ Weights .pth ที่เทรนมาเฉพาะ ให้โหลดเพิ่มที่นี่)
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
@@ -38,11 +37,10 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. ฟังก์ชันประมวลผล (ปรับให้เสถียรและเร็วขึ้น)
+# 2. ฟังก์ชันประมวลผล (ปรับปรุงเพิ่มการตรวจจับความเคลื่อนไหวและเสียง)
 # ==========================================
 def extract_frames(video_path, target_fps=3):
-    # เปลี่ยนจากการนับเฟรม (frame_interval) เป็นการดึงตามเวลา (target_fps) 
-    # ทำให้วิเคราะห์คลิป 30fps หรือ 60fps ได้มาตรฐานเดียวกัน (ดึง 3 เฟรม/วินาที)
+    # [จุดที่แก้] เพิ่มการเก็บค่า motion_scores เพื่อดักจับ "อวัยวะหาย/กลายพันธุ์ (Morphing)"
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
@@ -51,23 +49,36 @@ def extract_frames(video_path, target_fps=3):
     if interval < 1: interval = 1
     
     frames = []
+    motion_scores = []
+    prev_gray = None
     count = 0
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
         
         if count % interval == 0:
-            # ย่อขนาดทันทีเพื่อเซฟ RAM
             frame_resized = cv2.resize(frame, (224, 224))
             rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            gray_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+            
+            # คำนวณความต่างของพิกเซล ถ้าแขนขาหายวับไป ค่านี้จะพุ่ง
+            if prev_gray is not None:
+                diff = cv2.absdiff(gray_frame, prev_gray)
+                motion_scores.append(np.mean(diff))
+            else:
+                motion_scores.append(0.0)
+                
+            prev_gray = gray_frame
             frames.append(rgb_frame)
         count += 1
     cap.release()
-    return frames
+    return frames, motion_scores
 
 def analyze_audio_and_lipsync(video_path):
+    # [จุดที่แก้] เพิ่มการจับ "เสียงพูดไม่มีจังหวะหายใจ (ต่างดาว/AI)"
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
-    audio_risk, lip_sync_risk = 0.0, 0.0
+    audio_risk = 0.0
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -88,12 +99,19 @@ def analyze_audio_and_lipsync(video_path):
         fft_data = np.abs(np.fft.rfft(data_float))
         fft_sum = np.sum(fft_data)
         
-        # ค้นหาลักษณะเสียงสังเคราะห์ (Spectral Flatness)
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 5.0 # แปลงเป็น 5% โดยตรง
+                audio_risk += 5.0 # เสียงทื่อหุ่นยนต์
+                
+        # [ใหม่] เช็กจังหวะเงียบ (Breath gaps) - เสียงพูด AI มักจะพูดรัวๆ ไม่มีจังหวะพักหายใจ
+        window_size = int(sample_rate * 0.1) 
+        energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
+        if len(energies) > 0:
+            energy_variance = np.var(energies) / (np.mean(energies) + 1e-6)
+            if energy_variance < 0.5: 
+                audio_risk += 15.0 # เสียงพูดผิดปกติ/ต่างดาว ปรับตกหนักขึ้น
         
     except Exception:
         pass
@@ -101,7 +119,7 @@ def analyze_audio_and_lipsync(video_path):
         if os.path.exists(audio_path):
             os.unlink(audio_path)
             
-    return audio_risk, lip_sync_risk
+    return audio_risk, 0.0
 
 # ==========================================
 # 3. UI และ ระบบประมวลผลหลัก
@@ -116,7 +134,8 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 75.0 # เกณฑ์ตัดตก (เกิน 75% = ไม่ผ่าน)
+        THRESHOLD = 75.0 
+        WARNING_THRESHOLD = 60.0
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -135,7 +154,8 @@ if uploaded_files:
                     
                     try:
                         with st.spinner("กำลังวิเคราะห์..."):
-                            frames = extract_frames(video_path, target_fps=3)
+                            # รับค่า motion_scores กลับมาด้วย
+                            frames, motion_scores = extract_frames(video_path, target_fps=3)
                             
                             if not frames:
                                 st.caption("⚠️ ไม่สามารถอ่านภาพจากวิดีโอได้")
@@ -149,13 +169,32 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
-                                # --- 💡 การวิเคราะห์ความต่อเนื่อง (Temporal Logic) ---
+                                # --- 💡 การวิเคราะห์ตรรกะใหม่ (เน้นความแม่นยำ) ---
                                 mean_prob = float(np.mean(frame_scores)) * 100
+                                base_score = mean_prob
+                                glitch_penalty = 0.0
+                                details_list = []
                                 
-                                # นับเฟรมที่คะแนนพุ่ง (มีความเสี่ยงว่าพัง/บิดเบี้ยว)
+                                # 1. ต้นคลิปพัง (Early Glitch) - ตรวจจับมือหาย/หน้าเบี้ยวใน 1-2 วิแรก
+                                early_probs = frame_scores[:5]
+                                if len(early_probs) > 0 and np.max(early_probs) > 0.70:
+                                    glitch_penalty += 25.0
+                                    details_list.append("อวัยวะผิดปกติตั้งแต่ต้นคลิป")
+                                
+                                # 2. การละลาย/อวัยวะตัด (Morphing) - เฟรมเสี่ยง AI + มีการเปลี่ยนรูปฉับพลัน
+                                morph_detected = False
+                                avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
+                                for i in range(1, len(frame_scores)):
+                                    if frame_scores[i] > 0.65 and motion_scores[i] > (avg_motion * 1.8):
+                                        morph_detected = True
+                                        break
+                                
+                                if morph_detected:
+                                    glitch_penalty += 30.0
+                                    details_list.append("พบการละลาย/อวัยวะกลืนหาย")
+                                
+                                # 3. พังต่อเนื่อง (จากโค้ดเดิมของคุณ)
                                 suspect_frames = [1 if score > 0.65 else 0 for score in frame_scores]
-                                
-                                # หาช่วงเวลาที่พัง "ต่อเนื่อง" ยาวที่สุด
                                 max_consecutive = 0
                                 current_consecutive = 0
                                 for is_suspect in suspect_frames:
@@ -164,41 +203,41 @@ if uploaded_files:
                                         max_consecutive = max(max_consecutive, current_consecutive)
                                     else:
                                         current_consecutive = 0
-                                        
-                                # คิดคะแนนพื้นฐานจากค่าเฉลี่ย
-                                base_score = mean_prob
                                 
-                                # เงื่อนไขให้อภัย vs งัดให้ตก
-                                if max_consecutive >= 3:
-                                    # พังต่อเนื่อง 3 เฟรมขึ้นไป (ประมาณ 1 วิ) = มือละลาย/ของหายชัดเจน -> งัดคะแนนให้ตก
-                                    glitch_penalty = 35.0
-                                    details = "พบภาพบิดเบี้ยว/ผิดปกติต่อเนื่อง"
-                                elif max_consecutive > 0:
-                                    # พังแค่ 1-2 เฟรม (เสี้ยววิ) = กล้องสั่น/เบลอ -> อนุโลม หักนิดเดียว
-                                    glitch_penalty = 5.0
-                                    details = "พบจุดแปลกเล็กน้อย (อนุโลมให้)"
-                                else:
-                                    glitch_penalty = 0.0
-                                    details = "ภาพรวมแนบเนียน"
+                                if max_consecutive >= 3 and not morph_detected:
+                                    glitch_penalty += 20.0
+                                    details_list.append("พบภาพบิดเบี้ยวต่อเนื่อง")
+                                elif max_consecutive > 0 and glitch_penalty == 0:
+                                    glitch_penalty += 5.0
+                                    details_list.append("พบจุดแปลกเล็กน้อย (อนุโลมให้)")
                                     
-                                audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path)
-                                
-                                # รวมคะแนน
+                                # รวมคะแนนเสียง
+                                audio_risk, _ = analyze_audio_and_lipsync(video_path)
+                                if audio_risk >= 10.0:
+                                    details_list.append("เสียงพูดผิดธรรมชาติ")
+                                    
+                                # สรุปข้อความ Note
+                                if not details_list:
+                                    details = "ภาพรวมแนบเนียน"
+                                else:
+                                    details = " | ".join(details_list)
+                                    
+                                # รวมคะแนนสุดท้าย
                                 final_score = np.clip(base_score + glitch_penalty + audio_risk, 0.0, 100.0)
                                 
+                                # แยก 3 สถานะตาม UI เดิมของคุณ
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **REJECT** ({final_score:.0f}%)", icon="🚨")
                                     st.write(f"*{details}*")
+                                elif final_score >= WARNING_THRESHOLD:
+                                    status = "WARNING"
+                                    st.warning(f"⚠️ **WARNING** ({final_score:.0f}%)", icon="⚠️")
+                                    st.write(f"*{details} (ผ่านหวุดหวิด)*")
                                 else:
                                     status = "PASS"
-                                    # ถ้าคะแนนคาบเส้น (60-74%) จะขึ้นเตือนสีส้มแบบผ่านหวุดหวิด
-                                    if final_score >= 60.0:
-                                        st.warning(f"✅ **PASS** ({final_score:.0f}%)", icon="⚠️")
-                                        st.write(f"*{details} (ผ่านหวุดหวิด)*")
-                                    else:
-                                        st.success(f"✅ **PASS** ({final_score:.0f}%)", icon="🟢")
-                                        st.write(f"*{details}*")
+                                    st.success(f"✅ **PASS** ({final_score:.0f}%)", icon="🟢")
+                                    st.write(f"*{details}*")
                                         
                                 st.progress(min(int(final_score), 100))
                                 
@@ -207,9 +246,9 @@ if uploaded_files:
                     finally:
                         if os.path.exists(video_path):
                             os.unlink(video_path)
-                        # ระบบคืนพื้นที่ RAM แบบถอนรากถอนโคน
                         if 'frames' in locals(): del frames
                         if 'frame_scores' in locals(): del frame_scores
+                        if 'motion_scores' in locals(): del motion_scores
                         gc.collect()
                         if torch.cuda.is_available(): torch.cuda.empty_cache()
                     
@@ -221,19 +260,17 @@ if uploaded_files:
                         "หมายเหตุ": details
                     })
         
-       # ==========================================
-        # 4. แดชบอร์ดสรุปผลรวม 3 ระดับ
+        # ==========================================
+        # 4. แดชบอร์ดสรุปผลรวม 3 ระดับ (คงเดิม 100%)
         # ==========================================
         st.divider()
         st.subheader("📋 แดชบอร์ดสรุปผลรวม")
         df_all = pd.DataFrame(results_summary)
         
-        # แยก DataFrame ตาม 3 สถานะ
         df_pass = df_all[df_all["สถานะ"] == "PASS"]
         df_warning = df_all[df_all["สถานะ"] == "WARNING"]
         df_reject = df_all[df_all["สถานะ"] == "REJECT"]
         
-        # แสดงตัวเลขสรุปด้านบน
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("จำนวนทั้งหมด", f"{len(df_all)} คลิป")
         m2.metric("✅ ผ่าน", f"{len(df_pass)} คลิป")
@@ -242,7 +279,6 @@ if uploaded_files:
         
         st.write("---")
         
-        # สร้าง 3 คอลัมน์สำหรับโชว์ตารางแยก
         c1, c2, c3 = st.columns(3)
         
         with c1:
