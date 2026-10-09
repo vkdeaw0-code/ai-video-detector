@@ -221,26 +221,50 @@ if uploaded_files:
                         "หมายเหตุ": details
                     })
         
-        # ==========================================
-        # 4. สรุปผลลัพธ์ภาพรวม (Dashboard)
+       # ==========================================
+        # 4. แดชบอร์ดสรุปผลรวม 3 ระดับ
         # ==========================================
         st.divider()
-        st.subheader("📋 สรุปผลรวมทั้งหมด")
+        st.subheader("📋 แดชบอร์ดสรุปผลรวม")
         df_all = pd.DataFrame(results_summary)
         
-        m1, m2, m3 = st.columns(3)
-        total_clips = len(df_all)
-        rejected_df = df_all[df_all["สถานะ"] == "REJECT"]
-        rejected_count = len(rejected_df)
-        pass_count = total_clips - rejected_count
-        reject_rate = (rejected_count / total_clips * 100) if total_clips > 0 else 0
+        # แยก DataFrame ตาม 3 สถานะ
+        df_pass = df_all[df_all["สถานะ"] == "PASS"]
+        df_warning = df_all[df_all["สถานะ"] == "WARNING"]
+        df_reject = df_all[df_all["สถานะ"] == "REJECT"]
         
-        m1.metric("จำนวนคลิปทั้งหมด", f"{total_clips} คลิป")
-        m2.metric("✅ ผ่าน (PASS)", f"{pass_count} คลิป")
-        m3.metric("❌ คัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}%", delta_color="inverse")
+        # แสดงตัวเลขสรุปด้านบน
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("จำนวนทั้งหมด", f"{len(df_all)} คลิป")
+        m2.metric("✅ ผ่าน", f"{len(df_pass)} คลิป")
+        m3.metric("⚠️ พอใช้ได้", f"{len(df_warning)} คลิป")
+        m4.metric("❌ ไม่ผ่านเลย", f"{len(df_reject)} คลิป")
         
-        if not rejected_df.empty:
-            st.error("⚠️ รายชื่อคลิปที่ไม่ผ่านเกณฑ์:")
-            st.dataframe(rejected_df[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], use_container_width=True, hide_index=True)
+        st.write("---")
         
+        # สร้าง 3 คอลัมน์สำหรับโชว์ตารางแยก
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.success("✅ คลิปที่ **ผ่าน** (<60%)")
+            if not df_pass.empty:
+                st.dataframe(df_pass[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง"]], hide_index=True, use_container_width=True)
+            else:
+                st.caption("ไม่มีคลิปในกลุ่มนี้")
+                
+        with c2:
+            st.warning("⚠️ คลิปที่ **พอใช้ได้** (60-74%)")
+            if not df_warning.empty:
+                st.dataframe(df_warning[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
+            else:
+                st.caption("ไม่มีคลิปในกลุ่มนี้")
+                
+        with c3:
+            st.error("❌ คลิปที่ **ไม่ผ่านเลย** (≥75%)")
+            if not df_reject.empty:
+                st.dataframe(df_reject[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
+            else:
+                st.caption("ไม่มีคลิปในกลุ่มนี้")
+        
+        st.success("🎉 ตรวจสอบเสร็จสิ้น ระบบได้ล้างแคชเพื่อคืน RAM ให้กับเครื่องแล้ว")
         st.success("🎉 ตรวจสอบเสร็จสิ้น ระบบได้ล้างแคชเพื่อคืน RAM ให้กับเครื่องแล้ว")
