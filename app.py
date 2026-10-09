@@ -6,6 +6,8 @@ import numpy as np
 import tempfile
 import os
 import pandas as pd
+import librosa
+from moviepy.editor import VideoFileClip
 from PIL import Image
 from torchvision import transforms
 
@@ -16,14 +18,14 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบตรวจจับแบบปรับสมดุลเพื่อการใช้งานจริง")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (ตรวจจับภาพ + เสียงพากย์ AI)")
+st.write("สแกนโครงสร้างภาพและวิเคราะห์คลื่นความถี่เสียงพากย์สังเคราะห์เพื่อประเมินความเสี่ยง AI")
 
 # --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
 st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
 sensitivity_mode = st.sidebar.radio(
     "เลือกโหมดการตรวจจับ:",
-    ["🟢 โหมดผ่อนผัน (แนะนำ - คลิปทั่วไป/รีวิวผ่านได้)", "🚨 โหมดเข้มงวด (จับผิดเงามือ/นิ้วเพี้ยน)"],
+    ["🟢 โหมดผ่อนผัน (แนะนำ - คลิปทั่วไป/รีวิวผ่านได้)", "🚨 โหมดเข้มงวด (จับผิดภาพและเสียง AI)"],
     index=0
 )
 
@@ -46,6 +48,7 @@ transform = transforms.Compose([
 
 # --- 3. HELPER FUNCTIONS ---
 def extract_frames(video_path, frame_interval=20):
+    """สกัดเฟรมภาพออกจากคลิปวิดีโอ"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -64,6 +67,43 @@ def extract_frames(video_path, frame_interval=20):
     cap.release()
     return frames
 
+def analyze_audio_artifacts(video_path):
+    """สกัดและตรวจจับคลื่นความถี่เสียงสังเคราะห์ AI (TTS / Voice Clone)"""
+    audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+    try:
+        # สกัดเสียงจากวิดีโอด้วย MoviePy
+        video = VideoFileClip(video_path)
+        if video.audio is None:
+            return 0.0 # คลิปไม่มีเสียง
+            
+        video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+        video.close()
+        
+        # วิเคราะห์ลักษณะสัญญาณเสียงด้วย Librosa
+        y, sr = librosa.load(audio_path, sr=None)
+        if len(y) == 0:
+            return 0.0
+            
+        # 1. วิเคราะห์ Spectral Flatness (เสียง AI มักมีความถี่ราบเรียบและคงที่ผิดธรรมชาติ)
+        flatness = np.mean(librosa.feature.spectral_flatness(y=y))
+        
+        # 2. วิเคราะห์ Spectral Rolloff (ขอบเขตความถี่เสียงพากย์)
+        rolloff = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))
+        
+        audio_score = 0.0
+        if flatness < 0.001 or flatness > 0.05: # เสียงสังเคราะห์หลุดช่วงธรรมชาติ
+            audio_score += 0.25
+        if rolloff > 8000: # ความถี่สูงลอยแบบดนตรี/เสียงสังเคราะห์ดิจิทัล
+            audio_score += 0.20
+            
+        os.unlink(audio_path)
+        return min(audio_score, 0.4)
+        
+    except Exception as e:
+        if os.path.exists(audio_path):
+            os.unlink(audio_path)
+        return 0.0
+
 # --- 4. WEB UI INTERFACE ---
 uploaded_files = st.file_uploader(
     "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันหลายไฟล์ได้", 
@@ -76,7 +116,7 @@ if uploaded_files:
     
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ผลการวิเคราะห์:")
+        st.subheader("📊 ผลการวิเคราะห์ (ภาพ + เสียง):")
         
         results_summary = []
         cols = st.columns(3)
@@ -92,7 +132,7 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    with st.spinner("กำลังสแกน..."):
+                    with st.spinner("กำลังสแกนภาพและเสียง..."):
                         frames = extract_frames(video_path)
                         
                         if not frames:
@@ -100,6 +140,7 @@ if uploaded_files:
                             status = "ERROR"
                             percent_score = 0
                         else:
+                            # 1. ตรวจจับภาพด้วย EfficientNet
                             scores = []
                             with torch.no_grad():
                                 for frame_np in frames:
@@ -109,21 +150,23 @@ if uploaded_files:
                                     probs = torch.softmax(output, dim=1)
                                     scores.append(probs[0][1].item())
                             
-                            raw_score = float(np.median(scores))
+                            image_raw_score = float(np.median(scores))
                             
-                            # 🎯 ปรับการคำนวณตามโหมดที่ผู้ใช้เลือกใน Sidebar
+                            # 2. ตรวจจับเสียง AI ด้วย Librosa
+                            audio_risk_score = analyze_audio_artifacts(video_path)
+                            
+                            # 🎯 คำนวณคะแนนรวม (ภาพ + เสียง) ตามโหมดที่เลือก
                             if "โหมดผ่อนผัน" in sensitivity_mode:
-                                # ปรับสเกลนุ่มนวล เพื่อให้คลิปที่รีวิวสินค้า/มือแวบผ่านได้สบายๆ
-                                calibrated_score = np.clip((raw_score - 0.5) * 0.5 + 0.25, 0.0, 1.0)
+                                image_calibrated = np.clip((image_raw_score - 0.5) * 0.5 + 0.25, 0.0, 1.0)
+                                total_score = min(1.0, image_calibrated + (audio_risk_score * 0.3))
                                 THRESHOLD = 0.85
                             else:
-                                # โหมดเข้มงวด คัดออกง่ายขึ้นสำหรับเคสกระจก/เงาเพี้ยน
-                                calibrated_score = raw_score
+                                total_score = min(1.0, image_raw_score + audio_risk_score)
                                 THRESHOLD = 0.65
                                 
-                            percent_score = float(calibrated_score * 100)
+                            percent_score = float(total_score * 100)
                             
-                            if calibrated_score >= THRESHOLD:
+                            if total_score >= THRESHOLD:
                                 status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
@@ -138,6 +181,7 @@ if uploaded_files:
                         "ลำดับ": idx + 1,
                         "ชื่อไฟล์": uploaded_file.name,
                         "คะแนนความแปลก AI (%)": f"{percent_score:.2f}%",
+                        "คะแนนความเสี่ยงเสียง AI": f"{audio_risk_score*100:.1f}%",
                         "สถานะ": status
                     })
         
@@ -163,7 +207,7 @@ if uploaded_files:
         if not df_rejected.empty:
             st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป ดังรายการด้านล่าง:")
             st.dataframe(
-                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)"]], 
+                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)", "คะแนนความเสี่ยงเสียง AI"]], 
                 use_container_width=True,
                 hide_index=True
             )
