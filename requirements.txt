@@ -6,5 +6,6 @@ timm
 Pillow
 numpy
 pandas
-librosa
 moviepy
+imageio-ffmpeg
+scipy
