@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("✨ **Smart Tolerance System:** สรุปผล 3 ระดับ (ผ่าน / พอใช้ได้ / ไม่ผ่าน)")
+st.write("✨ **Smart Tolerance System:** อนุโลมจุดผิดปกติเสี้ยววินาที แต่ปัดตกทันทีหากภาพ/มือบิดเบี้ยวต่อเนื่องนานเกินไป")
 
 @st.cache_resource
 def load_detection_models():
@@ -37,7 +37,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. ฟังก์ชันประมวลผล
+# 2. ฟังก์ชันประมวลผล (ปรับให้เสถียรและเร็วขึ้น)
 # ==========================================
 def extract_frames(video_path, target_fps=3):
     cap = cv2.VideoCapture(video_path)
@@ -63,7 +63,7 @@ def extract_frames(video_path, target_fps=3):
 
 def analyze_audio_and_lipsync(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
-    audio_risk = 0.0
+    audio_risk, lip_sync_risk = 0.0, 0.0
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -88,7 +88,7 @@ def analyze_audio_and_lipsync(video_path):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 5.0 
+                audio_risk = 5.0
         
     except Exception:
         pass
@@ -96,7 +96,7 @@ def analyze_audio_and_lipsync(video_path):
         if os.path.exists(audio_path):
             os.unlink(audio_path)
             
-    return audio_risk, 0.0
+    return audio_risk, lip_sync_risk
 
 # ==========================================
 # 3. UI และ ระบบประมวลผลหลัก
@@ -161,18 +161,18 @@ if uploaded_files:
                                 
                                 if max_consecutive >= 3:
                                     glitch_penalty = 35.0
-                                    details = "พบภาพบิดเบี้ยวต่อเนื่อง"
+                                    details = "พบภาพบิดเบี้ยว/ผิดปกติต่อเนื่อง"
                                 elif max_consecutive > 0:
                                     glitch_penalty = 5.0
-                                    details = "พบจุดแปลกเล็กน้อย"
+                                    details = "พบจุดแปลกเล็กน้อย (อนุโลมให้)"
                                 else:
                                     glitch_penalty = 0.0
                                     details = "ภาพรวมแนบเนียน"
                                     
-                                audio_risk, _ = analyze_audio_and_lipsync(video_path)
+                                audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path)
                                 final_score = np.clip(base_score + glitch_penalty + audio_risk, 0.0, 100.0)
                                 
-                                # แยก 3 สถานะ
+                                # ปรับเงื่อนไขเพื่อแยกสถานะ 3 ระดับ
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **REJECT** ({final_score:.0f}%)", icon="🚨")
@@ -189,7 +189,7 @@ if uploaded_files:
                                 st.progress(min(int(final_score), 100))
                                 
                     except Exception as e:
-                        st.caption(f"⚠️ Error")
+                        st.caption(f"⚠️ Error: {str(e)}")
                     finally:
                         if os.path.exists(video_path):
                             os.unlink(video_path)
@@ -207,44 +207,48 @@ if uploaded_files:
                     })
         
         # ==========================================
-        # 4. แดชบอร์ดสรุปผล 3 ระดับ
+        # 4. แดชบอร์ดสรุปผลรวม 3 ระดับ
         # ==========================================
         st.divider()
         st.subheader("📋 แดชบอร์ดสรุปผลรวม")
         df_all = pd.DataFrame(results_summary)
         
+        # แยก DataFrame ตามสถานะ
         df_pass = df_all[df_all["สถานะ"] == "PASS"]
         df_warning = df_all[df_all["สถานะ"] == "WARNING"]
         df_reject = df_all[df_all["สถานะ"] == "REJECT"]
         
+        # แสดงตัวเลขสรุป
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("จำนวนทั้งหมด", f"{len(df_all)} คลิป")
-        m2.metric("✅ ผ่าน (PASS)", f"{len(df_pass)} คลิป")
-        m3.metric("⚠️ พอใช้ได้ (WARNING)", f"{len(df_warning)} คลิป")
-        m4.metric("❌ ไม่ผ่านเลย (REJECT)", f"{len(df_reject)} คลิป")
+        m2.metric("✅ ผ่าน", f"{len(df_pass)} คลิป")
+        m3.metric("⚠️ พอใช้ได้", f"{len(df_warning)} คลิป")
+        m4.metric("❌ ไม่ผ่านเลย", f"{len(df_reject)} คลิป")
         
         st.write("---")
         
+        # สร้าง 3 คอลัมน์สำหรับโชว์ตารางแยกแต่ละประเภท
         c1, c2, c3 = st.columns(3)
+        
         with c1:
             st.success("✅ คลิปที่ **ผ่าน** (<60%)")
             if not df_pass.empty:
-                st.dataframe(df_pass[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง"]], hide_index=True)
+                st.dataframe(df_pass[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง"]], hide_index=True, use_container_width=True)
             else:
                 st.caption("ไม่มีคลิปในกลุ่มนี้")
                 
         with c2:
             st.warning("⚠️ คลิปที่ **พอใช้ได้** (60-74%)")
             if not df_warning.empty:
-                st.dataframe(df_warning[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True)
+                st.dataframe(df_warning[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
             else:
                 st.caption("ไม่มีคลิปในกลุ่มนี้")
                 
         with c3:
             st.error("❌ คลิปที่ **ไม่ผ่านเลย** (≥75%)")
             if not df_reject.empty:
-                st.dataframe(df_reject[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True)
+                st.dataframe(df_reject[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
             else:
                 st.caption("ไม่มีคลิปในกลุ่มนี้")
         
-        st.success("🎉 ตรวจสอบเสร็จสิ้น ระบบได้คืน RAM ให้เครื่องแล้ว")
+        st.success("🎉 ตรวจสอบเสร็จสิ้น ระบบได้ล้างแคชเพื่อคืน RAM ให้กับเครื่องแล้ว")
