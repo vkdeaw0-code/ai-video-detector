@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบสแกนโหมดเดียวแบบสมดุล (ปรับเกณฑ์ให้คลิปรีวิวสินค้า AI คุณภาพสูงสามารถผ่านได้)")
+st.write("ระบบสแกนดักจับจุดผิดปกติ (เน้นตรวจจับจุดที่เพี้ยนที่สุดในคลิป)")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -40,7 +40,8 @@ transform = transforms.Compose([
 ])
 
 # --- 3. HELPER FUNCTIONS ---
-def extract_frames(video_path, frame_interval=15):
+# 💡 ปรับให้ดึงภาพถี่ขึ้น (จาก 15 เหลือ 10) เพื่อไม่ให้พลาดจุดที่นิ้วละลายในเสี้ยววินาที
+def extract_frames(video_path, frame_interval=10):
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -88,7 +89,6 @@ def analyze_audio_and_lipsync(video_path, frames):
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
-            # ลดความเสี่ยงของเสียงพากย์ AI ลงเหลือแค่ 4% (ยอมรับการใช้ TTS ในคลิปรีวิวมากขึ้น)
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
                 audio_risk = 0.04 
                 
@@ -144,7 +144,6 @@ if uploaded_files:
         results_summary = []
         cols = st.columns(3)
         
-        # ปรับเกณฑ์ (Threshold) ขยับขึ้นเป็น 75% เพื่อให้คลิปที่มีจุดเพี้ยนเล็กน้อยสามารถผ่านได้
         THRESHOLD = 0.75 
         
         for idx, uploaded_file in enumerate(uploaded_files):
@@ -191,9 +190,12 @@ if uploaded_files:
                                 
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                                 
-                                # ปรับสูตรให้บีบคะแนนภาพรวมลงมานิดหน่อย คลิปแบบนี้จะตกอยู่ที่ประมาณ 60-65%
-                                dynamic_base = (min_val * 0.2) + (mean_val * 0.4) + (max_val * 0.3) + (std_val * 0.1)
-                                calibrated_score = (np.power(dynamic_base, 1.9) * 0.80) + audio_risk + lip_sync_risk
+                                # 💡 สมการใหม่: ตัด min_val ทิ้ง ให้น้ำหนัก max_val สูงสุด (50%) 
+                                # เพื่อให้เฟรมที่พังที่สุดดึงคะแนนรวมขึ้นมา ไม่โดนเฟรมปกติกดทับ
+                                dynamic_base = (mean_val * 0.3) + (max_val * 0.5) + (std_val * 0.2)
+                                
+                                # ปรับเส้นโค้งพลังกำลัง (Power) ให้ลดการกดคะแนนลง
+                                calibrated_score = (np.power(dynamic_base, 1.4) * 0.90) + audio_risk + lip_sync_risk
                                 
                                 percent_score = float(np.clip(calibrated_score * 100, 3.0, 96.0))
                                 
