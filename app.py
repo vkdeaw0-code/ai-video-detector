@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบประเมินคุณภาพคลิปวิดีโอ AI")
-st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% สแกนความละเอียดสูงพร้อมประเมินเสียง")
+st.write("ระบบวิเคราะห์ภาพรวม (0-100%): **อนุโลมคลิป AI ที่คุณภาพเนียน** จับผิดเฉพาะอวัยวะหายและภาพละลายที่ผิดปกติจริงๆ")
 
 @st.cache_resource
 def load_detection_models():
@@ -101,19 +101,19 @@ def analyze_audio_and_lipsync(video_path):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk += 4.0 
+                audio_risk += 3.0 
                 
         window_size = int(sample_rate * 0.1) 
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         if len(energies) > 0:
             energy_variance = np.var(energies) / (np.mean(energies) + 1e-6)
-            if energy_variance < 0.4: 
-                audio_risk += 6.0 
+            if energy_variance < 0.35: 
+                audio_risk += 5.0 
                 
         if audio_risk >= 8.0:
-            audio_msg = "🔊 เสียงเพี้ยนมาก/ฟังไม่รู้เรื่อง (AI ชัดเจน)"
+            audio_msg = "🔊 เสียงพูดผิดธรรมชาติมาก/ฟังไม่รู้เรื่อง"
         elif audio_risk > 0:
-            audio_msg = "🔊 เสียงคล้าย AI เล็กน้อย (พอใช้)"
+            audio_msg = "🔊 พบการใช้เสียงสังเคราะห์ (AI Voice)"
         
     except Exception:
         return 0.0, "⚠️ ไม่สามารถวิเคราะห์เสียงได้"
@@ -154,7 +154,7 @@ if uploaded_files:
                     details = ""
                     
                     try:
-                        with st.spinner("สแกนถี่ระดับ 8 FPS..."):
+                        with st.spinner("สแกน 8 FPS (เน้นสมดุล)..."):
                             frames, motion_scores = extract_frames(video_path, target_fps=8)
                             
                             if not frames:
@@ -172,9 +172,13 @@ if uploaded_files:
                                 mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
                                 
-                                # ปรับสมดุล Base Score ให้ลดความเข้มงวดลงเล็กน้อย
-                                base_score = (median_prob * 30.0) + (mean_prob * 20.0)
-                                glitch_thresh = min(0.92, max(0.82, median_prob + 0.15))
+                                # 💡 1. ฐานคะแนน (Base Score) - กดให้ต่ำลง คลิป AI เนียนๆ จะได้แค่ราวๆ 20-40% 
+                                base_score = (median_prob * 30.0) + (mean_prob * 10.0)
+                                
+                                # 💡 2. ระบบ Spike Detection - จะด่าว่าพังก็ต่อเมื่อเฟรมนั้นคะแนน "โดด" ไปจากค่ากลาง 15% 
+                                # ถ้าวิดีโอเป็น AI ทั้งคลิป (median=0.99) ระบบจะไม่มองว่าเป็น Glitch เลย
+                                def is_spike(p):
+                                    return p > 0.85 and p > (median_prob + 0.15)
                                 
                                 glitch_penalty = 0.0
                                 defect_count = 0
@@ -182,22 +186,26 @@ if uploaded_files:
                                 
                                 # ตรวจสอบ 1: ต้นคลิปพัง
                                 early_probs = frame_scores[:8]
-                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 3:
+                                if sum([1 for p in early_probs if is_spike(p)]) >= 2:
                                     defect_count += 1
                                     glitch_penalty += 15.0
                                     details_list.append("⚠️ รูปร่าง/แสงบิดเบี้ยวตั้งแต่ต้นคลิป")
                                 
-                                # ตรวจสอบ 2: อวัยวะหรือสินค้าผิดรูปฉับพลัน 
+                                # ตรวจสอบ 2: อวัยวะผิดรูปฉับพลัน (Morphing / ขาขาด)
                                 avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
-                                morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.5)])
+                                morph_count = 0
+                                for i in range(1, len(frame_scores)):
+                                    # เฟรมพุ่งโดด + มีการกระตุกแรงกว่าปกติ 4 เท่า (ข้ามการสั่นของกล้องปกติไป)
+                                    if frame_scores[i] > 0.80 and motion_scores[i] > max(avg_motion * 4.0, 5.0):
+                                        morph_count += 1
                                 
                                 if morph_count >= 2:
                                     defect_count += 1
                                     glitch_penalty += 25.0
-                                    details_list.append("⚠️ อวัยวะหรือสินค้าผิดรูปฉับพลัน (ขาขาด/มือหาย)")
+                                    details_list.append("⚠️ อวัยวะหรือสินค้าผิดรูป (ขาด/กลืนหาย)")
                                 
                                 # ตรวจสอบ 3: ภาพละลายต่อเนื่อง
-                                suspect_frames = [1 if score > glitch_thresh else 0 for score in frame_scores]
+                                suspect_frames = [1 if is_spike(score) else 0 for score in frame_scores]
                                 max_consecutive = 0
                                 current_consecutive = 0
                                 for is_suspect in suspect_frames:
@@ -207,12 +215,12 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                 
-                                if max_consecutive >= 8: # พังยาวเกิน 1 วินาที (ที่ 8fps)
+                                if max_consecutive >= 6: # ละลายแช่เกิน 0.75 วิ
                                     defect_count += 1
-                                    glitch_penalty += 25.0
-                                    details_list.append("⚠️ ภาพพื้นหลังหรือวัตถุละลายต่อเนื่อง")
-                                elif max_consecutive >= 4: # กระตุกเสี้ยววินาที 
-                                    glitch_penalty += 8.0
+                                    glitch_penalty += 20.0
+                                    details_list.append("⚠️ ภาพพื้นหลัง/วัตถุละลายต่อเนื่อง")
+                                elif max_consecutive >= 3: 
+                                    glitch_penalty += 5.0
                                 
                                 # ตรวจสอบ 4: เสียง
                                 audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
@@ -222,14 +230,19 @@ if uploaded_files:
                                 if audio_msg:
                                     details_list.append(audio_msg)
                                         
-                                # กฎทวีคูณ
+                                # กฎทวีคูณ (เจอของพังหลายอย่างพร้อมกัน งัดให้ตกชัวร์ๆ)
                                 if defect_count >= 2:
-                                    glitch_penalty += 15.0
+                                    glitch_penalty += 20.0
                                         
                                 final_score = np.clip(base_score + glitch_penalty, 0.0, 100.0)
                                 
-                                details = " | ".join(list(dict.fromkeys(details_list)))
+                                # จัดการข้อความ
+                                if not details_list or (len(details_list) == 1 and "พบการใช้เสียงสังเคราะห์" in details_list[0]):
+                                    details = "คลิปวิดีโอสมจริง คุณภาพใช้งานได้" if not details_list else "พบการใช้เสียงสังเคราะห์ (AI Voice) แต่ภาพรวมสมจริง"
+                                else:
+                                    details = " | ".join(list(dict.fromkeys(details_list)))
                                 
+                                # ประเมินผล
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **ไม่ผ่าน** ({final_score:.0f}%)")
