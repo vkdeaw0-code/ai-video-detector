@@ -6,6 +6,9 @@ import numpy as np
 import tempfile
 import os
 import pandas as pd
+import subprocess
+import imageio_ffmpeg
+from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
 
@@ -17,13 +20,13 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("สแกนและวิเคราะห์ความเสี่ยงคลิปวิดีโอ 10 วินาที พร้อมแสดงเปอร์เซ็นต์กระจายตัวตามจริง")
+st.write("สแกนวิเคราะห์ภาพ เงาสะท้อน และเสียงพากย์สังเคราะห์ ปรับเกณฑ์ผ่อนผันให้เข้มรัดกุมขึ้น")
 
 # --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
 st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
 sensitivity_mode = st.sidebar.radio(
     "เลือกโหมดการตรวจจับ:",
-    ["🟢 โหมดผ่อนผัน (เกณฑ์ 85% - ปล่อยผ่านงานรีวิว/โฆษณาที่เนียน)", "🚨 โหมดเข้มงวด (เกณฑ์ 65% - ดักจับจุดเพี้ยนอย่างละเอียด)"],
+    ["🟢 โหมดผ่อนผัน (เกณฑ์ 70% - ยอมรับงานเนียน คัดออกจุดเพี้ยนชัด)", "🚨 โหมดเข้มงวด (เกณฑ์ 55% - ดักจับละเอียดทุกมิติ)"],
     index=0
 )
 
@@ -46,7 +49,6 @@ transform = transforms.Compose([
 
 # --- 3. HELPER FUNCTIONS ---
 def extract_frames(video_path, frame_interval=15):
-    """สกัดเฟรมภาพออกจากคลิปวิดีโอแบบสุ่มกระจาย"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -65,6 +67,48 @@ def extract_frames(video_path, frame_interval=15):
     cap.release()
     return frames
 
+def analyze_audio_artifacts(video_path):
+    audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+    try:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        cmd = [
+            ffmpeg_exe, "-y", "-i", video_path,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            audio_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
+            return 0.0
+            
+        sample_rate, data = wavfile.read(audio_path)
+        if len(data) == 0:
+            os.unlink(audio_path)
+            return 0.0
+            
+        data_float = data.astype(np.float32)
+        fft_data = np.abs(np.fft.rfft(data_float))
+        
+        fft_sum = np.sum(fft_data)
+        if fft_sum == 0:
+            os.unlink(audio_path)
+            return 0.0
+            
+        normalized_fft = fft_data / fft_sum
+        spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
+        
+        audio_risk = 0.0
+        if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
+            audio_risk = 0.12
+            
+        os.unlink(audio_path)
+        return audio_risk
+        
+    except Exception:
+        if os.path.exists(audio_path):
+            os.unlink(audio_path)
+        return 0.0
+
 # --- 4. WEB UI INTERFACE ---
 uploaded_files = st.file_uploader(
     "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันหลายไฟล์ได้", 
@@ -81,12 +125,6 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        
-        # กำหนด THRESHOLD ตามโหมดที่เลือก
-        if "โหมดผ่อนผัน" in sensitivity_mode:
-            THRESHOLD = 0.85
-        else:
-            THRESHOLD = 0.65
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -117,22 +155,25 @@ if uploaded_files:
                                     fake_prob = probs[0][1].item()
                                     frame_scores.append(fake_prob)
                             
-                            # ดึงสถิติจริงจากแต่ละเฟรมภาพ
                             mean_val = float(np.mean(frame_scores))
                             std_val = float(np.std(frame_scores))
                             min_val = float(np.min(frame_scores))
                             max_val = float(np.max(frame_scores))
                             
-                            # 🎯 ปรับสูตรให้ % ขยับแตกต่างกันเป็นธรรมชาติในทุกโหมด
+                            # ตรวจจับเสียงสังเคราะห์
+                            audio_risk_score = analyze_audio_artifacts(video_path)
+                            
                             if "โหมดผ่อนผัน" in sensitivity_mode:
-                                soft_score = (min_val * 0.4) + (mean_val * 0.4) + (std_val * 0.2)
-                                calibrated_score = np.power(soft_score, 2.5) * 0.75
+                                # ปรับเพิ่มน้ำหนักให้เข้มข้นขึ้นแต่พอดี
+                                base_val = (median_val := float(np.median(frame_scores)) * 0.5) + (mean_val * 0.3) + (max_val * 0.2)
+                                calibrated_score = (np.power(base_val, 1.8) * 0.82) + audio_risk_score
+                                THRESHOLD = 0.70
                             else:
-                                # โหมดเข้มงวด: ดึงค่าน้ำหนักจาก Max Score และ Std Dev ร่วมด้วย
-                                strict_base = (mean_val * 0.5) + (max_val * 0.3) + (std_val * 0.2)
-                                calibrated_score = np.power(strict_base, 1.2) * 0.90
+                                strict_base = (mean_val * 0.4) + (max_val * 0.4) + (std_val * 0.2)
+                                calibrated_score = (np.power(strict_base, 1.1) * 0.92) + (audio_risk_score * 1.5)
+                                THRESHOLD = 0.55
                                 
-                            percent_score = float(np.clip(calibrated_score * 100, 1.0, 99.0))
+                            percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
                             
                             if (percent_score / 100.0) >= THRESHOLD:
                                 status = "REJECT"
