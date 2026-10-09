@@ -37,9 +37,9 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. ฟังก์ชันประมวลผล (ปรับให้สแกนละเอียดขึ้น)
+# 2. ฟังก์ชันประมวลผล 
 # ==========================================
-def extract_frames(video_path, target_fps=4): # เพิ่มเป็น 4 เฟรม/วิ เพื่อสแกนการขยับของ มือ/ขา/สินค้า ได้ละเอียดขึ้น
+def extract_frames(video_path, target_fps=4): 
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
@@ -96,7 +96,6 @@ def analyze_audio_and_lipsync(video_path):
         fft_data = np.abs(np.fft.rfft(data_float))
         fft_sum = np.sum(fft_data)
         
-        # ลดความเข้มงวดของเสียงลง ปล่อยผ่านได้มากขึ้น (หักสูงสุดแค่ 10%)
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
@@ -108,7 +107,7 @@ def analyze_audio_and_lipsync(video_path):
         if len(energies) > 0:
             energy_variance = np.var(energies) / (np.mean(energies) + 1e-6)
             if energy_variance < 0.5: 
-                audio_risk += 5.0 # ลดการหักคะแนนลงจากเดิม 15.0
+                audio_risk += 5.0 
         
     except Exception:
         pass
@@ -165,39 +164,44 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
-                                # --- 💡 ตรรกะใหม่: ลดความเข้มงวด นับจำนวนจุดบกพร่อง (Defect Rules) ---
-                                mean_prob = float(np.mean(frame_scores)) * 100
-                                median_prob = float(np.median(frame_scores)) * 100
-                                # ใช้ค่ากลางผสมค่าเฉลี่ยเป็น Base Score ทำให้กราฟนิ่งขึ้น ไม่โดดเพราะเฟรมเบลอเฟรมเดียว
-                                base_score = (median_prob * 0.7) + (mean_prob * 0.3) 
+                                # --- 💡 จุดที่แก้ไข: Adaptive Threshold (อนุโลม AI ที่ภาพเนียน) ---
+                                mean_prob = float(np.mean(frame_scores))
+                                median_prob = float(np.median(frame_scores))
+                                
+                                # 1. Base Score: ปรับสเกลใหม่ให้วิดีโอ AI ที่ "เนียน" ได้คะแนนตั้งต้นแค่ 30-55% (ไม่ให้ทะลุ 75% ตั้งแต่แรก)
+                                base_score = (median_prob * 45.0) + (mean_prob * 10.0) 
+                                
+                                # 2. Dynamic Threshold: หาจุดที่เป็น "ภาพพัง" จริงๆ
+                                # เพดานการจับผิดจะขยับตามความเนียนของคลิป (ขั้นต่ำ 80% สูงสุด 92%)
+                                glitch_thresh = min(0.92, max(0.80, median_prob + 0.10))
                                 
                                 glitch_penalty = 0.0
                                 defect_count = 0
                                 details_list = []
                                 
-                                # 1. ต้นคลิป (Early Glitch) - อนุโลมมากขึ้น ต้องพังชัดเจนถึง 2 เฟรมในช่วงแรก
+                                # 3. ต้นคลิปพัง (Early Glitch)
                                 early_probs = frame_scores[:6]
-                                bad_early_frames = sum([1 for p in early_probs if p > 0.75])
+                                bad_early_frames = sum([1 for p in early_probs if p > glitch_thresh])
                                 if bad_early_frames >= 2:
                                     defect_count += 1
-                                    glitch_penalty += 10.0
+                                    glitch_penalty += 8.0 # ลดโทษลง
                                     details_list.append("จุดบกพร่องต้นคลิป")
                                 
-                                # 2. การละลาย/อวัยวะผิดรูป (Morphing) เน้นสแกน มือ ขา สินค้า
+                                # 4. การละลาย/อวัยวะผิดรูป (Morphing) 
                                 avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
                                 morph_count = 0
                                 for i in range(1, len(frame_scores)):
-                                    # ยกระดับความมั่นใจของ AI เป็น > 0.80 และการกระตุกของพิกเซลต้องแรงมาก ป้องกันคลิปปกติที่คนเดินเร็วแล้วตก
-                                    if frame_scores[i] > 0.80 and motion_scores[i] > (avg_motion * 2.5):
+                                    # การกระตุกต้องแรงมากถึง 3 เท่าของปกติ ถึงจะมองว่าอวัยวะหาย
+                                    if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.0):
                                         morph_count += 1
                                 
                                 if morph_count >= 2:
                                     defect_count += 1
-                                    glitch_penalty += 15.0
-                                    details_list.append("อวัยวะ/สินค้าผิดรูปฉับพลัน")
+                                    glitch_penalty += 12.0
+                                    details_list.append("อวัยวะ/สินค้าผิดรูป")
                                 
-                                # 3. บิดเบี้ยวต่อเนื่อง (Sustained Glitch)
-                                suspect_frames = [1 if score > 0.75 else 0 for score in frame_scores]
+                                # 5. บิดเบี้ยวต่อเนื่อง (Sustained Glitch)
+                                suspect_frames = [1 if score > glitch_thresh else 0 for score in frame_scores]
                                 max_consecutive = 0
                                 current_consecutive = 0
                                 for is_suspect in suspect_frames:
@@ -207,32 +211,33 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                 
-                                if max_consecutive >= 4: # พังติดกันประมาณ 1 วิ
+                                if max_consecutive >= 5: # พังติดกันเกิน 1 วิ (อนุโลมให้มากขึ้น)
                                     defect_count += 1
-                                    glitch_penalty += 20.0
+                                    glitch_penalty += 15.0
                                     details_list.append("ภาพบิดเบี้ยวต่อเนื่อง")
-                                elif max_consecutive >= 2:
-                                    glitch_penalty += 3.0
-                                    # แค่เบลอเสี้ยววิ ไม่งับเป็นความผิดหลัก
+                                elif max_consecutive >= 3:
+                                    glitch_penalty += 5.0
+                                    # เบลอแป๊บเดียว ไม่นับเป็น Defect หลัก จึงไม่บวก defect_count
                                 
-                                # 4. เสียง (Audio)
+                                # 6. เสียง (Audio)
                                 audio_risk, _ = analyze_audio_and_lipsync(video_path)
                                 if audio_risk > 0:
+                                    glitch_penalty += audio_risk
                                     details_list.append("เสียงบกพร่องเล็กน้อย")
                                     
-                                # 5. กฎคัดออก 3 จุด (The 3-Defect Rule)
+                                # 7. กฎคัดออก (The 3-Defect Multiplier)
                                 if defect_count >= 3:
-                                    glitch_penalty += 25.0
-                                    details_list.append("❌ พบข้อบกพร่องหลายจุด")
+                                    glitch_penalty += 20.0
+                                    details_list.append("❌ ขัดข้องรุนแรงหลายจุด")
                                 
                                 # สรุปข้อความ Note
                                 if not details_list:
                                     details = "สมจริงและภาพรวมแนบเนียน"
                                 else:
-                                    # ลบข้อความซ้ำซ้อน
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                     
-                                final_score = np.clip(base_score + glitch_penalty + audio_risk, 0.0, 100.0)
+                                final_score = np.clip(base_score + glitch_penalty, 0.0, 100.0)
+                                # -------------------------------------------------------------
                                 
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
