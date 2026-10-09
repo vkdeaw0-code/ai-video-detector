@@ -26,13 +26,9 @@ def load_detection_models():
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
-    
-    mp_face_detection = mp.solutions.face_detection
-    face_detector = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
-    
-    return model, face_detector, device
+    return model, device
 
-model, face_detector, device = load_detection_models()
+model, device = load_detection_models()
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -46,37 +42,40 @@ def extract_and_crop_faces(video_path, frame_interval=10):
     cropped_faces = []
     count = 0
     
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    # โหลด FaceDetection ผ่าน mp.solutions โดยตรงภายในฟังก์ชัน
+    mp_face_detection = mp.solutions.face_detection
+    
+    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detector:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            if count % frame_interval == 0:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = face_detector.process(rgb_frame)
+                
+                if results.detections:
+                    h, w, _ = frame.shape
+                    for detection in results.detections:
+                        bbox = detection.location_data.relative_bounding_box
+                        xmin = max(0, int(bbox.xmin * w))
+                        ymin = max(0, int(bbox.ymin * h))
+                        width = int(bbox.width * w)
+                        height = int(bbox.height * h)
+                        
+                        xmax = min(w, xmin + width)
+                        ymax = min(h, ymin + height)
+                        
+                        face = rgb_frame[ymin:ymax, xmin:xmax]
+                        if face.shape[0] > 10 and face.shape[1] > 10:
+                            cropped_faces.append(face)
+            count += 1
             
-        if count % frame_interval == 0:
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_detector.process(rgb_frame)
-            
-            if results.detections:
-                h, w, _ = frame.shape
-                for detection in results.detections:
-                    bbox = detection.location_data.relative_bounding_box
-                    xmin = max(0, int(bbox.xmin * w))
-                    ymin = max(0, int(bbox.ymin * h))
-                    width = int(bbox.width * w)
-                    height = int(bbox.height * h)
-                    
-                    xmax = min(w, xmin + width)
-                    ymax = min(h, ymin + height)
-                    
-                    face = rgb_frame[ymin:ymax, xmin:xmax]
-                    if face.shape[0] > 10 and face.shape[1] > 10:
-                        cropped_faces.append(face)
-        count += 1
-        
     cap.release()
     return cropped_faces
 
 # --- 4. WEB UI INTERFACE (MULTI-FILE SUPPORT) ---
-# เปิดใช้งาน accept_multiple_files=True เพื่อรองรับการเลือกหลายคลิปพร้อมกัน
 uploaded_files = st.file_uploader(
     "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันหลายไฟล์ได้", 
     type=["mp4", "mov", "avi"],
@@ -90,11 +89,9 @@ if uploaded_files:
         st.divider()
         st.subheader("📊 ตารางสรุปผลการวิเคราะห์:")
         
-        # วนลูปตรวจจับทีละคลิป
         for idx, uploaded_file in enumerate(uploaded_files, 1):
             st.markdown(f"### 🎬 คลิปที่ {idx}: `{uploaded_file.name}`")
             
-            # สร้างไฟล์ชั่วคราวเพื่ออ่านวิดีโอ
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             video_path = tfile.name
@@ -126,6 +123,5 @@ if uploaded_files:
                         
                     st.progress(min(int(percent_score), 100))
             
-            # ลบไฟล์ชั่วคราว
             os.unlink(video_path)
             st.divider()
