@@ -19,14 +19,14 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (ตรวจจับภาพ + เสียงพากย์ AI)")
-st.write("สแกนโครงสร้างภาพและวิเคราะห์คลื่นความถี่เสียงพากย์สังเคราะห์เพื่อประเมินความเสี่ยง AI")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
+st.write("สแกนและวิเคราะห์ความเสี่ยงคลิปวิดีโอด้วย Sigmoid Calibration ให้คะแนนกระจายตัวอย่างสมจริง")
 
 # --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
 st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
 sensitivity_mode = st.sidebar.radio(
     "เลือกโหมดการตรวจจับ:",
-    ["🟢 โหมดผ่อนผัน (แนะนำ - คลิปทั่วไป/รีวิวผ่านได้)", "🚨 โหมดเข้มงวด (จับผิดภาพและเสียง AI)"],
+    ["🟢 โหมดผ่อนผัน (เกณฑ์ 80% - ยอมรับงานพาณิชย์/รีวิว)", "🚨 โหมดเข้มงวด (เกณฑ์ 60% - ดักจับจุดเพี้ยนละเอียด)"],
     index=0
 )
 
@@ -49,7 +49,6 @@ transform = transforms.Compose([
 
 # --- 3. HELPER FUNCTIONS ---
 def extract_frames(video_path, frame_interval=20):
-    """สกัดเฟรมภาพออกจากคลิปวิดีโอ"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -69,11 +68,9 @@ def extract_frames(video_path, frame_interval=20):
     return frames
 
 def analyze_audio_artifacts(video_path):
-    """สกัดและตรวจจับคลื่นความถี่เสียงสังเคราะห์ AI โดยใช้ ffmpeg & scipy"""
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        # สกัดเสียงเฉพาะเป็น WAV 16kHz Mono
         cmd = [
             ffmpeg_exe, "-y", "-i", video_path,
             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
@@ -82,29 +79,27 @@ def analyze_audio_artifacts(video_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
-            return 0.0 # คลิปไม่มีเสียง
+            return 0.0
             
         sample_rate, data = wavfile.read(audio_path)
         if len(data) == 0:
             os.unlink(audio_path)
             return 0.0
             
-        # คำนวณ Spectral Energy Distribution เพื่อหาค่าเสียงสังเคราะห์ AI
         data_float = data.astype(np.float32)
         fft_data = np.abs(np.fft.rfft(data_float))
         
-        # เสียงสังเคราะห์มักมี Flatness สเปกตรัมช่วงความถี่สูงคงที่ผิดธรรมชาติ
         fft_sum = np.sum(fft_data)
         if fft_sum == 0:
             os.unlink(audio_path)
             return 0.0
             
         normalized_fft = fft_data / fft_sum
-        spectral_flatness = np.exp(np.mean(np.log(normalized_fft + 1e-12)))
+        spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
         
         audio_risk = 0.0
         if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-            audio_risk = 0.25
+            audio_risk = 0.15
             
         os.unlink(audio_path)
         return audio_risk
@@ -113,6 +108,12 @@ def analyze_audio_artifacts(video_path):
         if os.path.exists(audio_path):
             os.unlink(audio_path)
         return 0.0
+
+def sigmoid_calibrate(score):
+    """ปรับกราฟคะแนนให้เป็น Sigmoid Curve สมจริง ไม่กระจุกที่ 50% หรือ 100%"""
+    # Softening Sigmoid Scale
+    calibrated = 1.0 / (1.0 + np.exp(-6.0 * (score - 0.85)))
+    return float(np.clip(calibrated, 0.05, 0.95))
 
 # --- 4. WEB UI INTERFACE ---
 uploaded_files = st.file_uploader(
@@ -126,10 +127,16 @@ if uploaded_files:
     
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ผลการวิเคราะห์ (ภาพ + เสียง):")
+        st.subheader("📊 ผลการวิเคราะห์:")
         
         results_summary = []
         cols = st.columns(3)
+        
+        # กำหนด THRESHOLD ตามโหมดที่เลือก
+        if "โหมดผ่อนผัน" in sensitivity_mode:
+            THRESHOLD = 0.80
+        else:
+            THRESHOLD = 0.60
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -142,7 +149,7 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    with st.spinner("กำลังสแกนภาพและเสียง..."):
+                    with st.spinner("กำลังวิเคราะห์ความเสี่ยง..."):
                         frames = extract_frames(video_path)
                         
                         if not frames:
@@ -150,7 +157,6 @@ if uploaded_files:
                             status = "ERROR"
                             percent_score = 0
                         else:
-                            # 1. ตรวจจับภาพด้วย EfficientNet
                             scores = []
                             with torch.no_grad():
                                 for frame_np in frames:
@@ -160,23 +166,16 @@ if uploaded_files:
                                     probs = torch.softmax(output, dim=1)
                                     scores.append(probs[0][1].item())
                             
-                            image_raw_score = float(np.median(scores))
-                            
-                            # 2. ตรวจจับเสียง AI
+                            raw_image_score = float(np.median(scores))
                             audio_risk_score = analyze_audio_artifacts(video_path)
                             
-                            # 🎯 คำนวณคะแนนรวม (ภาพ + เสียง) ตามโหมดที่เลือก
-                            if "โหมดผ่อนผัน" in sensitivity_mode:
-                                image_calibrated = np.clip((image_raw_score - 0.5) * 0.5 + 0.25, 0.0, 1.0)
-                                total_score = min(1.0, image_calibrated + (audio_risk_score * 0.3))
-                                THRESHOLD = 0.85
-                            else:
-                                total_score = min(1.0, image_raw_score + audio_risk_score)
-                                THRESHOLD = 0.65
-                                
-                            percent_score = float(total_score * 100)
+                            # คำนวณผ่าน Sigmoid Calibration
+                            calibrated_img = sigmoid_calibrate(raw_image_score)
+                            final_score = min(1.0, calibrated_img + (audio_risk_score * 0.2))
                             
-                            if total_score >= THRESHOLD:
+                            percent_score = float(final_score * 100)
+                            
+                            if final_score >= THRESHOLD:
                                 status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
@@ -191,7 +190,6 @@ if uploaded_files:
                         "ลำดับ": idx + 1,
                         "ชื่อไฟล์": uploaded_file.name,
                         "คะแนนความแปลก AI (%)": f"{percent_score:.2f}%",
-                        "คะแนนความเสี่ยงเสียง AI": f"{audio_risk_score*100:.1f}%",
                         "สถานะ": status
                     })
         
@@ -217,7 +215,7 @@ if uploaded_files:
         if not df_rejected.empty:
             st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป ดังรายการด้านล่าง:")
             st.dataframe(
-                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)", "คะแนนความเสี่ยงเสียง AI"]], 
+                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)"]], 
                 use_container_width=True,
                 hide_index=True
             )
