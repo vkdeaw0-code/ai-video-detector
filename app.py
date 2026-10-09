@@ -6,7 +6,6 @@ import numpy as np
 import tempfile
 import os
 import pandas as pd
-import mediapipe as mp
 from PIL import Image
 from torchvision import transforms
 
@@ -17,7 +16,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับคลิปวิดีโอ AI (ตรวจจับมือนิ้วเพี้ยน & เงามือในกระจก)")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (ตรวจจับมือและเงาสะท้อนเพี้ยน)")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ เพื่อสแกนหาความผิดปกติและคัดออกอัตโนมัติ")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -36,36 +36,36 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# --- 3. HAND ANOMALY DETECTION (ฟังก์ชันใหม่สำหรับตรวจจับมือ/เงาสะท้อนมือเพี้ยน) ---
-def check_hand_anomalies(rgb_frame):
-    """สแกนหาความผิดปกติของมือ นิ้วงอก นิ้วขาด หรือเงามือไม่สมบูรณ์"""
-    mp_hands = mp.solutions.hands
-    anomaly_score = 0.0
+# --- 3. HAND & REFLECTION ANOMALY DETECTION (ใช้ OpenCV Contour Analysis) ---
+def analyze_hand_reflection_anomalies(rgb_frame):
+    """วิเคราะห์ความผิดปกติของขอบมือ เงาสะท้อนในกระจก และร่องรอยนิ้วเพี้ยนด้วย OpenCV"""
+    gray = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
     
-    with mp_hands.Hands(
-        static_image_mode=True,
-        max_num_hands=4, # ตรวจจับได้สูงสุด 4 มือ (รวมเงาสะท้อนในกระจก)
-        min_detection_confidence=0.3
-    ) as hands:
-        results = hands.process(rgb_frame)
-        
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                landmarks = hand_landmarks.landmark
-                # เช็กจำนวนข้อต่อมือว่าครบ 21 จุดมาตรฐานหรือไม่
-                if len(landmarks) < 21:
-                    anomaly_score += 0.5 # มือหรือเงามือขาดหายไปบางส่วน
+    # 1. ใช้ Adaptive Threshold สกัดขอบวัตถุและมือ
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 2. ค้นหา Contour (เส้นขอบวงกลม/รูปทรงมือและวัตถุ)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    anomaly_penalty = 0.0
+    
+    # 3. ตรวจเช็กความบิดเบี้ยวของ Convexity Defects (ร่องนิ้วมือ/เงาขาดหาย)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if 1000 < area < 50000: # กรองเฉพาะขนาดของมือหรือเงาสะท้อน
+            hull = cv2.convexHull(cnt, returnPoints=False)
+            if len(hull) > 3:
+                try:
+                    defects = cv2.convexityDefects(cnt, hull)
+                    if defects is not None:
+                        # ถ้าร่องนิ้วห่าง/บิดเบี้ยวผิดสัดส่วน (ลักษณะพิกเซลแตกของ AI)
+                        if len(defects) > 10: 
+                            anomaly_penalty += 0.15
+                except:
+                    pass
                     
-                # ตรวจเช็กระยะห่างนิ้วที่บิดเบี้ยวผิดธรรมชาติ (AI Artifacts)
-                # เช็กความสัมพันธ์ระหว่างโคนนิ้วกับปลายเล็บ
-                wrist = np.array([landmarks[0].x, landmarks[0].y])
-                index_tip = np.array([landmarks[8].x, landmarks[8].y])
-                dist = np.linalg.norm(wrist - index_tip)
-                
-                if dist < 0.02 or dist > 0.8: # สัดส่วนมือผิดปกติ
-                    anomaly_score += 0.4
-                    
-    return anomaly_score
+    return min(anomaly_penalty, 0.5)
 
 def extract_frames(video_path, frame_interval=20):
     cap = cv2.VideoCapture(video_path)
@@ -114,7 +114,7 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    with st.spinner("กำลังสแกนมือและภาพรวม..."):
+                    with st.spinner("กำลังสแกนมือและเงาสะท้อน..."):
                         frames = extract_frames(video_path)
                         
                         if not frames:
@@ -123,34 +123,33 @@ if uploaded_files:
                             percent_score = 0
                         else:
                             scores = []
-                            hand_anomalies = []
+                            hand_penalties = []
                             
                             with torch.no_grad():
                                 for frame_np in frames:
-                                    # 1. ตรวจจับภาพรวมด้วย EfficientNet
+                                    # 1. วิเคราะห์โครงสร้างภาพด้วย EfficientNet
                                     pil_img = Image.fromarray(frame_np)
                                     input_tensor = transform(pil_img).unsqueeze(0).to(device)
                                     output = model(input_tensor)
                                     probs = torch.softmax(output, dim=1)
                                     scores.append(probs[0][1].item())
                                     
-                                    # 2. ตรวจจับมือและเงามือเพี้ยนด้วย MediaPipe Hand
-                                    h_score = check_hand_anomalies(frame_np)
-                                    hand_anomalies.append(h_score)
+                                    # 2. สแกนเงาสะท้อนมือและขอบนิ้วด้วย OpenCV Analysis
+                                    penalty = analyze_hand_reflection_anomalies(frame_np)
+                                    hand_penalties.append(penalty)
                             
-                            # รวมคะแนนภาพรวม + คะแนนความผิดปกติของมือในกระจก
                             base_score = float(np.median(scores))
-                            hand_penalty = float(np.mean(hand_anomalies))
+                            extra_penalty = float(np.mean(hand_penalties))
                             
-                            # ถ้าพบว่ามือหรือเงามือในกระจกเพี้ยน ให้บวกคะแนนความแปลกเพิ่มทันที
-                            total_score = min(1.0, base_score + (hand_penalty * 0.5))
+                            # รวมคะแนนภาพรวม + คะแนนเงาสะท้อนมือเพี้ยน
+                            total_score = min(1.0, base_score + extra_penalty)
                             
-                            THRESHOLD = 0.70 # เกณฑ์มาตรฐาน
+                            THRESHOLD = 0.70  # เกณฑ์ตัดสิน
                             percent_score = float(total_score * 100)
                             
                             if total_score >= THRESHOLD:
                                 status = "REJECT"
-                                st.error(f"❌ **REJECT** ({percent_score:.0f}%) - พบจุดเพี้ยน/เงาลอย", icon="🚨")
+                                st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
                                 status = "PASS"
                                 st.success(f"✅ **PASS** ({percent_score:.0f}%)", icon="🟢")
@@ -168,7 +167,7 @@ if uploaded_files:
         
         # --- 5. REJECTED CLIPS DASHBOARD ---
         st.divider()
-        st.header("🚫 แดชบอร์ดสรุปคลิปที่ไม่ผ่านการคัดกรอง")
+        st.header("🚫 แดชบอร์ดสรุปคลิปที่ไม่ผ่านการคัดกรอง (Rejected Clips Dashboard)")
         
         df_all = pd.DataFrame(results_summary)
         df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
@@ -194,4 +193,4 @@ if uploaded_files:
             )
         else:
             st.balloons()
-            st.success("🎉 ยินดีด้วย! ไม่พบคลิปที่ติดสถานะ REJECT ในรอบนี้")
+            st.success("🎉 ยินดีด้วย! ไม่พบคลิปที่ติดสถานะ REJECT ในรอบนี้ ทุกคลิปผ่านการคัดกรองทั้งหมด")
