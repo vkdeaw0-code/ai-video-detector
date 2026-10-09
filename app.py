@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบสแกนดักจับจุดผิดปกติ (เน้นตรวจจับจุดที่เพี้ยนที่สุดในคลิป)")
+st.write("ระบบสแกนดักจับจุดผิดปกติ (เน้นดักจับมือบิดเบี้ยวและภาพลอยเคลื่อนไหว)")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -40,23 +40,17 @@ transform = transforms.Compose([
 ])
 
 # --- 3. HELPER FUNCTIONS ---
-# 💡 ปรับให้ดึงภาพถี่ขึ้น (จาก 15 เหลือ 10) เพื่อไม่ให้พลาดจุดที่นิ้วละลายในเสี้ยววินาที
 def extract_frames(video_path, frame_interval=10):
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
-    
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret:
-            break
-            
+        if not ret: break
         if count % frame_interval == 0:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(rgb_frame)
-                    
         count += 1
-        
     cap.release()
     return frames
 
@@ -64,7 +58,6 @@ def analyze_audio_and_lipsync(video_path, frames):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     audio_risk = 0.0
     lip_sync_risk = 0.0
-    
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -73,7 +66,6 @@ def analyze_audio_and_lipsync(video_path, frames):
             audio_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
             return 0.0, 0.0
             
@@ -84,8 +76,8 @@ def analyze_audio_and_lipsync(video_path, frames):
             
         data_float = data.astype(np.float32)
         fft_data = np.abs(np.fft.rfft(data_float))
-        
         fft_sum = np.sum(fft_data)
+        
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
@@ -98,20 +90,16 @@ def analyze_audio_and_lipsync(video_path, frames):
             face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
             prev_mouth = None
             motion_scores = []
-            
             for frame in frames:
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
-                
                 if len(faces) > 0:
                     x, y, w, h = faces[0]
                     mouth_roi = cv2.resize(gray[y + int(h/2):y+h, x:x+w], (64, 32))
-                    
                     if prev_mouth is not None:
                         diff = cv2.absdiff(mouth_roi, prev_mouth)
                         motion_scores.append(np.mean(diff))
                     prev_mouth = mouth_roi
-            
             if len(motion_scores) > 0:
                 avg_mouth_motion = np.mean(motion_scores)
                 if avg_mouth_motion < 2.0 and rms_energy > 1000:
@@ -121,7 +109,6 @@ def analyze_audio_and_lipsync(video_path, frames):
                     
         os.unlink(audio_path)
         return audio_risk, lip_sync_risk
-        
     except Exception:
         if os.path.exists(audio_path):
             os.unlink(audio_path)
@@ -136,27 +123,19 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
-    
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์:")
         
         results_summary = []
         cols = st.columns(3)
-        
         THRESHOLD = 0.75 
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
-            
             with col:
                 with st.container(border=True):
-                    
-                    if len(uploaded_file.name) > 20:
-                        display_name = f"{uploaded_file.name[:20]}..."
-                    else:
-                        display_name = uploaded_file.name
-                        
+                    display_name = f"{uploaded_file.name[:20]}..." if len(uploaded_file.name) > 20 else uploaded_file.name
                     st.caption(f"🎬 คลิปที่ {idx+1}: **{display_name}**")
                     
                     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -169,7 +148,6 @@ if uploaded_files:
                     try:
                         with st.spinner("กำลังสแกนภาพ, เสียง, และจังหวะปาก..."):
                             frames = extract_frames(video_path)
-                            
                             if not frames:
                                 st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
                             else:
@@ -180,22 +158,22 @@ if uploaded_files:
                                         input_tensor = transform(pil_img).unsqueeze(0).to(device)
                                         output = model(input_tensor)
                                         probs = torch.softmax(output, dim=1)
-                                        fake_prob = probs[0][1].item()
-                                        frame_scores.append(fake_prob)
+                                        frame_scores.append(probs[0][1].item())
                                 
                                 mean_val = float(np.mean(frame_scores))
                                 std_val = float(np.std(frame_scores))
-                                min_val = float(np.min(frame_scores))
                                 max_val = float(np.max(frame_scores))
                                 
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                                 
-                                # 💡 สมการใหม่: ตัด min_val ทิ้ง ให้น้ำหนัก max_val สูงสุด (50%) 
-                                # เพื่อให้เฟรมที่พังที่สุดดึงคะแนนรวมขึ้นมา ไม่โดนเฟรมปกติกดทับ
-                                dynamic_base = (mean_val * 0.3) + (max_val * 0.5) + (std_val * 0.2)
+                                # 💡 ปรับสมการใหม่: ดัน Max Value (เฟรมที่พังสุด) เป็น 60%
+                                dynamic_base = (mean_val * 0.2) + (max_val * 0.6) + (std_val * 0.2)
                                 
-                                # ปรับเส้นโค้งพลังกำลัง (Power) ให้ลดการกดคะแนนลง
-                                calibrated_score = (np.power(dynamic_base, 1.4) * 0.90) + audio_risk + lip_sync_risk
+                                # 💡 จับการกะพริบ/ลอย: ถ้าภาพบิดไปมา (std_val สูง) ให้บวกคะแนนเพิ่มทันที
+                                motion_penalty = 0.10 if std_val > 0.15 else 0.0
+                                
+                                # 💡 ลดการกดคะแนน (power = 1.1) ทำให้คะแนนดิบสะท้อนออกมาตามจริงมากขึ้น
+                                calibrated_score = (np.power(dynamic_base, 1.1) * 0.95) + audio_risk + lip_sync_risk + motion_penalty
                                 
                                 percent_score = float(np.clip(calibrated_score * 100, 3.0, 96.0))
                                 
@@ -220,10 +198,8 @@ if uploaded_files:
                         "สถานะ": status
                     })
         
-        # --- 5. REJECTED CLIPS DASHBOARD ---
         st.divider()
         st.header("🚫 แดชบอร์ดสรุปคลิปที่ไม่ผ่านการคัดกรอง")
-        
         df_all = pd.DataFrame(results_summary)
         df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
         
@@ -238,13 +214,8 @@ if uploaded_files:
         m3.metric("จำนวนคลิปที่ถูกคัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}%", delta_color="inverse")
         
         st.write("")
-        
         if not df_rejected.empty:
             st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป:")
-            st.dataframe(
-                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง (%)"]], 
-                use_container_width=True,
-                hide_index=True
-            )
+            st.dataframe(df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง (%)"]], use_container_width=True, hide_index=True)
         else:
             st.success("🎉 ทุกคลิปผ่านการคัดกรองทั้งหมด")
