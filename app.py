@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบประเมินคุณภาพคลิปวิดีโอ AI")
-st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% **[เวอร์ชัน Dynamic] ปล่อยผ่านคลิป AI ที่สมูทและคุณภาพดี หักคะแนนเฉพาะจุดที่โป๊ะหรือบิดเบี้ยวฉับพลัน**")
+st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% **[โหมดอะลุ่มอล่วย] อนุโลมคลิป AI คุณภาพดี ปัดตกเฉพาะคลิปที่อวัยวะหรือเงาละลายนานผิดปกติ**")
 
 @st.cache_resource
 def load_detection_models():
@@ -44,8 +44,7 @@ def extract_frames(video_path, target_fps=6):
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
     
-    interval = int(video_fps / target_fps)
-    if interval < 1: interval = 1
+    interval = max(1, int(video_fps / target_fps))
     
     frames = []
     motion_scores = []
@@ -126,7 +125,7 @@ def analyze_audio_and_lipsync(video_path):
 # ==========================================
 # 3. UI และ ระบบประมวลผลหลัก
 # ==========================================
-uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - แนะนำอัปโหลดครั้งละไม่เกิน 10 คลิป", type=["mp4", "mov", "avi"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - สามารถเลือกพร้อมกันได้หลายคลิป", type=["mp4", "mov", "avi"], accept_multiple_files=True)
 
 if uploaded_files:
     st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
@@ -169,51 +168,38 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
-                                mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
+                                mean_prob = float(np.mean(frame_scores))
                                 
-                                # 💡 1. Base Score ต่ำลง: ถ้าคลิป AI ทำมาเนียนกริบ คะแนนตั้งต้นจะอยู่แค่ราวๆ 15-25%
-                                base_score = min(25.0, (median_prob * 15.0) + (mean_prob * 10.0))
+                                # 💡 กดคะแนนตั้งต้นลงให้อยู่ที่ 0-20% (ใจดีกับคลิปปกติมากขึ้น)
+                                base_score = min(20.0, (median_prob * 12.0) + (mean_prob * 8.0))
                                 
                                 glitch_penalty = 0.0
                                 details_list = []
                                 
-                                # 💡 2. Dynamic Threshold: จะพิจารณาว่า "ภาพพัง" ก็ต่อเมื่อคะแนนความปลอม พุ่งสูงกว่าค่าเฉลี่ยของคลิปนั้นๆ มากกว่า 15%
-                                # แปลว่าถ้า AI เนียนทั้งคลิป (คะแนน 0.99 สม่ำเสมอ) จะไม่โดนหักคะแนนเลย!
-                                glitch_thresh = median_prob + 0.15 
-                                
-                                avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 1.0
-                                morph_count = 0
-                                consecutive_glitch = 0
-                                max_consecutive_glitch = 0
-                                
-                                for i in range(1, len(frame_scores)):
-                                    score = frame_scores[i]
-                                    motion = motion_scores[i]
-                                    
-                                    # เช็กการกระตุก/อวัยวะวาร์ป (คะแนนความปลอมสูง + มีการขยับแรงผิดปกติ)
-                                    if motion > (avg_motion * 3.5) and motion > 4.0 and score > 0.7:
-                                        morph_count += 1
+                                # 💡 1. อวัยวะละลายขั้นรุนแรง (ต้องมั่นใจ >97% และเป็นติดกันอย่างน้อย 4 เฟรม)
+                                max_severe = 0
+                                severe_count = 0
+                                for s in frame_scores:
+                                    if s > 0.97: 
+                                        severe_count += 1
+                                        max_severe = max(max_severe, severe_count)
+                                    else: 
+                                        severe_count = 0
                                         
-                                    # เช็กการละลาย/เบลอฉับพลัน (คะแนนความปลอมโดดขึ้นจากค่าเฉลี่ยของคลิป)
-                                    if score > glitch_thresh and score > 0.8:
-                                        consecutive_glitch += 1
-                                        max_consecutive_glitch = max(max_consecutive_glitch, consecutive_glitch)
-                                    else:
-                                        consecutive_glitch = 0
-                                
-                                # 💡 3. บทลงโทษที่สมเหตุสมผล
-                                if morph_count >= 2:
-                                    glitch_penalty += 35.0
-                                    details_list.append("⚠️ พบอวัยวะหรือสินค้าบิดเบี้ยว/วาร์ปฉับพลัน")
+                                if max_severe >= 4:
+                                    glitch_penalty += 55.0
+                                    details_list.append("⚠️ อวัยวะหรือเงาสะท้อนละลาย/ผิดรูป (รุนแรง)")
                                     
-                                if max_consecutive_glitch >= 4:
-                                    glitch_penalty += 25.0
-                                    details_list.append("⚠️ พบภาพละลาย/จุดโป๊ะที่ชัดเจน")
-                                elif max_consecutive_glitch >= 2:
-                                    glitch_penalty += 10.0
+                                # 💡 2. อวัยวะวาร์ป / กระตุกผิดธรรมชาติ (ลดความจู้จี้ ต้องกระตุกแรงกว่าเดิม 4 เท่า)
+                                avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
+                                warp_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > (median_prob + 0.20) and motion_scores[i] > max(avg_motion * 4.0, 6.0)])
                                 
-                                # ตรวจสอบ 4: เสียง
+                                if warp_count >= 2 and max_severe < 4:
+                                    glitch_penalty += 15.0
+                                    details_list.append("⚠️ ภาพหรืออวัยวะกระตุกผิดธรรมชาติ")
+                                
+                                # 💡 3. ตรวจสอบเสียง
                                 audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
                                 if audio_risk > 0:
                                     glitch_penalty += audio_risk
@@ -224,7 +210,7 @@ if uploaded_files:
                                 
                                 # จัดการข้อความ
                                 if not details_list or (len(details_list) == 1 and "พบการใช้เสียงสังเคราะห์" in details_list[0]):
-                                    details = "วิดีโอคุณภาพดี สมูทเป็นธรรมชาติ" if audio_risk == 0 else "วิดีโอภาพเนียน (ใช้ AI Voice)"
+                                    details = "วิดีโอคุณภาพดี ใช้งานได้ (อนุโลมผ่าน)" if audio_risk > 0 else "วิดีโอสมจริง เป็นธรรมชาติ"
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                 
