@@ -76,6 +76,7 @@ def extract_frames(video_path, target_fps=4):
 def analyze_audio_and_lipsync(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     audio_risk = 0.0
+    audio_msg = "เสียงปกติ/เป็นธรรมชาติ"
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -86,11 +87,11 @@ def analyze_audio_and_lipsync(video_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
-            return 0.0, 0.0
+            return 0.0, "ไม่มีเสียง/ไม่สามารถวิเคราะห์ได้"
             
         sample_rate, data = wavfile.read(audio_path)
         if len(data) == 0:
-            return 0.0, 0.0
+            return 0.0, "ไม่มีเสียง"
             
         data_float = data.astype(np.float32)
         fft_data = np.abs(np.fft.rfft(data_float))
@@ -100,22 +101,27 @@ def analyze_audio_and_lipsync(video_path):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk += 5.0 
+                audio_risk += 4.0 
                 
         window_size = int(sample_rate * 0.1) 
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         if len(energies) > 0:
             energy_variance = np.var(energies) / (np.mean(energies) + 1e-6)
             if energy_variance < 0.5: 
-                audio_risk += 5.0 
+                audio_risk += 6.0 
+                
+        if audio_risk >= 10.0:
+            audio_msg = "เสียงเพี้ยนมาก/ต่างดาว/ไม่เว้นจังหวะ"
+        elif audio_risk > 0:
+            audio_msg = "เสียงเพี้ยนหุ่นยนต์เล็กน้อย"
         
     except Exception:
-        pass
+        return 0.0, "ไม่สามารถวิเคราะห์เสียงได้"
     finally:
         if os.path.exists(audio_path):
             os.unlink(audio_path)
             
-    return audio_risk, 0.0
+    return audio_risk, audio_msg
 
 # ==========================================
 # 3. UI และ ระบบประมวลผลหลัก
@@ -164,43 +170,42 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
-                                # --- 💡 จุดที่แก้ไข: Adaptive Threshold (อนุโลม AI ที่ภาพเนียน) ---
+                                # --- 💡 จุดที่แก้ไข: ลดความเข้มงวดลง ---
                                 mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
                                 
-                                # 1. Base Score: ปรับสเกลใหม่ให้วิดีโอ AI ที่ "เนียน" ได้คะแนนตั้งต้นแค่ 30-55% (ไม่ให้ทะลุ 75% ตั้งแต่แรก)
-                                base_score = (median_prob * 45.0) + (mean_prob * 10.0) 
+                                # 1. Base Score: กดคะแนนเริ่มต้นลงอีกนิด
+                                base_score = (median_prob * 40.0) + (mean_prob * 10.0) 
                                 
-                                # 2. Dynamic Threshold: หาจุดที่เป็น "ภาพพัง" จริงๆ
-                                # เพดานการจับผิดจะขยับตามความเนียนของคลิป (ขั้นต่ำ 80% สูงสุด 92%)
-                                glitch_thresh = min(0.92, max(0.80, median_prob + 0.10))
+                                # 2. Dynamic Threshold: ขยับเพดานการจับผิดขึ้นเป็น 85%-95% (ต้องพังชัดเจนจริงๆ ถึงจะนับ)
+                                glitch_thresh = min(0.95, max(0.85, median_prob + 0.15))
                                 
                                 glitch_penalty = 0.0
                                 defect_count = 0
                                 details_list = []
                                 
-                                # 3. ต้นคลิปพัง (Early Glitch)
+                                # 3. ต้นคลิปพัง
                                 early_probs = frame_scores[:6]
                                 bad_early_frames = sum([1 for p in early_probs if p > glitch_thresh])
                                 if bad_early_frames >= 2:
                                     defect_count += 1
-                                    glitch_penalty += 8.0 # ลดโทษลง
+                                    glitch_penalty += 5.0 # ลดโทษลง
                                     details_list.append("จุดบกพร่องต้นคลิป")
                                 
-                                # 4. การละลาย/อวัยวะผิดรูป (Morphing) 
+                                # 4. อวัยวะผิดรูป (Morphing) 
                                 avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
                                 morph_count = 0
                                 for i in range(1, len(frame_scores)):
-                                    # การกระตุกต้องแรงมากถึง 3 เท่าของปกติ ถึงจะมองว่าอวัยวะหาย
-                                    if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.0):
+                                    # การกระตุกพิกเซลต้องแรงขึ้นอีกเป็น 3.5 เท่า ป้องกันการจับผิดคนขยับเร็ว
+                                    if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.5):
                                         morph_count += 1
                                 
                                 if morph_count >= 2:
                                     defect_count += 1
-                                    glitch_penalty += 12.0
+                                    glitch_penalty += 10.0 # ลดโทษลง
                                     details_list.append("อวัยวะ/สินค้าผิดรูป")
                                 
-                                # 5. บิดเบี้ยวต่อเนื่อง (Sustained Glitch)
+                                # 5. บิดเบี้ยวต่อเนื่อง
                                 suspect_frames = [1 if score > glitch_thresh else 0 for score in frame_scores]
                                 max_consecutive = 0
                                 current_consecutive = 0
@@ -211,28 +216,27 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                 
-                                if max_consecutive >= 5: # พังติดกันเกิน 1 วิ (อนุโลมให้มากขึ้น)
+                                if max_consecutive >= 5: 
                                     defect_count += 1
-                                    glitch_penalty += 15.0
+                                    glitch_penalty += 10.0 # ลดโทษลง
                                     details_list.append("ภาพบิดเบี้ยวต่อเนื่อง")
                                 elif max_consecutive >= 3:
-                                    glitch_penalty += 5.0
-                                    # เบลอแป๊บเดียว ไม่นับเป็น Defect หลัก จึงไม่บวก defect_count
+                                    glitch_penalty += 3.0 # ลดโทษลง
                                 
-                                # 6. เสียง (Audio)
-                                audio_risk, _ = analyze_audio_and_lipsync(video_path)
+                                # 6. เสียง (Audio) - นำข้อความที่ประมวลผลมาแสดง
+                                audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
                                 if audio_risk > 0:
                                     glitch_penalty += audio_risk
-                                    details_list.append("เสียงบกพร่องเล็กน้อย")
+                                details_list.append(audio_msg)
                                     
-                                # 7. กฎคัดออก (The 3-Defect Multiplier)
+                                # 7. กฎคัดออก (ลดการบวกคะแนนเพิ่ม)
                                 if defect_count >= 3:
-                                    glitch_penalty += 20.0
+                                    glitch_penalty += 15.0 # ลดการลงโทษลง
                                     details_list.append("❌ ขัดข้องรุนแรงหลายจุด")
                                 
                                 # สรุปข้อความ Note
                                 if not details_list:
-                                    details = "สมจริงและภาพรวมแนบเนียน"
+                                    details = "ภาพและเสียงสมจริงแนบเนียน"
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                     
