@@ -39,7 +39,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. ฟังก์ชันประมวลผล 
 # ==========================================
-def extract_frames(video_path, target_fps=8): # เพิ่มเป็น 8 เฟรม/วิ สแกนมือ คน สินค้า ได้ถี่ยิบขึ้น
+def extract_frames(video_path, target_fps=8): 
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
@@ -76,7 +76,7 @@ def extract_frames(video_path, target_fps=8): # เพิ่มเป็น 8 �
 def analyze_audio_and_lipsync(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     audio_risk = 0.0
-    audio_msg = "🔊 เสียงคุณภาพดี/เป็นธรรมชาติ" # ค่าเริ่มต้นถ้าเสียงปกติดี
+    audio_msg = "🔊 เสียงคุณภาพดี/เป็นธรรมชาติ"
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -110,7 +110,6 @@ def analyze_audio_and_lipsync(video_path):
             if energy_variance < 0.4: 
                 audio_risk += 6.0 
                 
-        # ประเมินคุณภาพเสียงและกำหนดข้อความ
         if audio_risk >= 8.0:
             audio_msg = "🔊 เสียงเพี้ยนมาก/ฟังไม่รู้เรื่อง (AI ชัดเจน)"
         elif audio_risk > 0:
@@ -137,7 +136,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 75.0 # ปรับเกณฑ์ไม่ผ่านเป็น 75%
+        THRESHOLD = 75.0 
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -173,25 +172,23 @@ if uploaded_files:
                                 mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
                                 
-                                # ฐานคะแนนสมดุลย์ ไม่ให้เกิน 60% แม้จะเป็น AI เพียวๆ เพื่อให้มีพื้นที่อนุโลม
-                                base_score = (median_prob * 35.0) + (mean_prob * 25.0)
-                                # เพดานจับผิด ยืดหยุ่นตามความเนียนของคลิป
+                                # ปรับสมดุล Base Score ให้ลดความเข้มงวดลงเล็กน้อย
+                                base_score = (median_prob * 30.0) + (mean_prob * 20.0)
                                 glitch_thresh = min(0.92, max(0.82, median_prob + 0.15))
                                 
                                 glitch_penalty = 0.0
                                 defect_count = 0
                                 details_list = []
                                 
-                                # ตรวจสอบ 1: ต้นคลิปพัง (วิเคราะห์ละเอียดขึ้นในช่วง 1 วิแรก)
+                                # ตรวจสอบ 1: ต้นคลิปพัง
                                 early_probs = frame_scores[:8]
-                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 2:
+                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 3:
                                     defect_count += 1
                                     glitch_penalty += 15.0
                                     details_list.append("⚠️ รูปร่าง/แสงบิดเบี้ยวตั้งแต่ต้นคลิป")
                                 
                                 # ตรวจสอบ 2: อวัยวะหรือสินค้าผิดรูปฉับพลัน 
                                 avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
-                                # ปรับตัวคูณ motion เป็น 3.5 ให้เข้ากับ 8FPS
                                 morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.5)])
                                 
                                 if morph_count >= 2:
@@ -210,11 +207,11 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                 
-                                if max_consecutive >= 6: # พังแช่ยาวเกิน 0.75 วิ
+                                if max_consecutive >= 8: # พังยาวเกิน 1 วินาที (ที่ 8fps)
                                     defect_count += 1
-                                    glitch_penalty += 20.0
+                                    glitch_penalty += 25.0
                                     details_list.append("⚠️ ภาพพื้นหลังหรือวัตถุละลายต่อเนื่อง")
-                                elif max_consecutive >= 3: # แค่กระตุกเสี้ยววิ
+                                elif max_consecutive >= 4: # กระตุกเสี้ยววินาที 
                                     glitch_penalty += 8.0
                                 
                                 # ตรวจสอบ 4: เสียง
@@ -222,20 +219,17 @@ if uploaded_files:
                                 if audio_risk > 0:
                                     glitch_penalty += audio_risk
                                 
-                                # เพิ่มข้อความประเมินเสียงลงในรายละเอียดเสมอ
                                 if audio_msg:
                                     details_list.append(audio_msg)
                                         
-                                # กฎทวีคูณ หากเจอความผิดปกติรุนแรงตั้งแต่ 2 อย่างขึ้นไป
+                                # กฎทวีคูณ
                                 if defect_count >= 2:
-                                    glitch_penalty += 12.0
+                                    glitch_penalty += 15.0
                                         
                                 final_score = np.clip(base_score + glitch_penalty, 0.0, 100.0)
                                 
-                                # จัดการข้อความ
                                 details = " | ".join(list(dict.fromkeys(details_list)))
                                 
-                                # ประเมินผล 2 ระดับ ตัดที่ 75%
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **ไม่ผ่าน** ({final_score:.0f}%)")
