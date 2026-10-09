@@ -5,7 +5,6 @@ import timm
 import numpy as np
 import tempfile
 import os
-import urllib.request
 from PIL import Image
 from torchvision import transforms
 
@@ -23,20 +22,13 @@ st.write("อัปโหลดคลิปวิดีโอ 10 วินาท
 @st.cache_resource
 def load_detection_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # โหลดโมเดลวิเคราะห์ภาพ AI
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
-    
-    # ดาวน์โหลดไฟล์ cascade แบบตรงหากไม่พบในระบบ
-    cascade_filename = "haarcascade_frontalface_default.xml"
-    if not os.path.exists(cascade_filename):
-        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
-        urllib.request.urlretrieve(url, cascade_filename)
-        
-    face_cascade = cv2.CascadeClassifier(cascade_filename)
-    return model, face_cascade, device
+    return model, device
 
-model, face_cascade, device = load_detection_models()
+model, device = load_detection_models()
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -45,9 +37,10 @@ transform = transforms.Compose([
 ])
 
 # --- 3. HELPER FUNCTIONS ---
-def extract_and_crop_faces(video_path, frame_interval=10):
+def extract_frames(video_path, frame_interval=15):
+    """ดึงเฟรมภาพออกจากคลิปวิดีโอเพื่อวิเคราะห์โดยตรง"""
     cap = cv2.VideoCapture(video_path)
-    cropped_faces = []
+    frames = []
     count = 0
     
     while cap.isOpened():
@@ -56,21 +49,13 @@ def extract_and_crop_faces(video_path, frame_interval=10):
             break
             
         if count % frame_interval == 0:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # สแกนหาใบหน้าด้วย OpenCV
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            
-            for (x, y, w, h) in faces:
-                face = rgb_frame[y:y+h, x:x+w]
-                if face.shape[0] > 10 and face.shape[1] > 10:
-                    cropped_faces.append(face)
+            frames.append(rgb_frame)
                     
         count += 1
         
     cap.release()
-    return cropped_faces
+    return frames
 
 # --- 4. WEB UI INTERFACE (MULTI-FILE SUPPORT) ---
 uploaded_files = st.file_uploader(
@@ -94,15 +79,15 @@ if uploaded_files:
             video_path = tfile.name
             
             with st.spinner(f"กำลังสแกนคลิปที่ {idx}/{len(uploaded_files)}..."):
-                faces = extract_and_crop_faces(video_path)
+                frames = extract_frames(video_path)
                 
-                if not faces:
-                    st.warning("⚠️ ไม่พบใบหน้าบุคคลในวิดีโอ ไม่สามารถวิเคราะห์ได้")
+                if not frames:
+                    st.warning("⚠️ ไม่สามารถอ่านเฟรมจากไฟล์วิดีโอนี้ได้")
                 else:
                     scores = []
                     with torch.no_grad():
-                        for face_np in faces:
-                            pil_img = Image.fromarray(face_np)
+                        for frame_np in frames:
+                            pil_img = Image.fromarray(frame_np)
                             input_tensor = transform(pil_img).unsqueeze(0).to(device)
                             output = model(input_tensor)
                             probs = torch.softmax(output, dim=1)
