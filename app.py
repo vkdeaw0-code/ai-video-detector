@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบประเมินคุณภาพคลิปวิดีโอ AI")
-st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ ตัดตกที่ 80% **[โหมดเน้นการใช้งานจริง] ตัดทิ้งเฉพาะคลิปที่มือหายเกิน 1 วินาที, สินค้าไม่สมบูรณ์, หรือเสียงเพี้ยนฟังไม่รู้เรื่อง อนุโลมภาพกระตุกหรือเสียงเพี้ยนเล็กน้อย**")
+st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ ตัดตกที่ 80% **[โหมดยืดหยุ่นสูง] ตัดทิ้งเฉพาะคลิปที่พังชัดเจน (มือหาย 1 วิ / เสียงพังยับ) อนุโลมจุดบกพร่องเล็กน้อยให้ผ่านได้ง่ายขึ้น**")
 
 @st.cache_resource
 def load_detection_models():
@@ -44,9 +44,7 @@ def extract_frames(video_path, target_fps=6):
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
     
-    # 6 FPS แปลว่า 1 วินาทีจะมี 6 เฟรม
     interval = max(1, int(video_fps / target_fps))
-    
     frames = []
     count = 0
     
@@ -86,24 +84,24 @@ def analyze_audio_and_lipsync(video_path):
         fft_data = np.abs(np.fft.rfft(data_float))
         fft_sum = np.sum(fft_data)
         
-        # กฎเกณฑ์เสียง (เพี้ยน 1 คำ = +30%, เพี้ยน 2 คำขึ้นไป = +65%)
+        # 💡 ถอยเซ็นเซอร์เสียงให้กว้างขึ้น เพื่ออนุโลมคลิปที่มีเพลงประกอบหรือเสียง AI เนียนๆ
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
-            if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
+            if spectral_flatness < 1e-6 or spectral_flatness > 2.0e-3: # กว้างขึ้น ไม่โดนหักง่ายๆ
                 audio_risk += 30.0 
                 
         window_size = int(sample_rate * 0.1) 
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         if len(energies) > 0:
             energy_variance = np.var(energies) / (np.mean(energies) + 1e-6)
-            if energy_variance < 0.4: 
+            if energy_variance < 0.3: # ลดเกณฑ์ลง ทำให้โอกาสเสียงตกยากขึ้น
                 audio_risk += 35.0 
                 
         if audio_risk >= 65.0:
             audio_msg = "🔊 เสียงเพี้ยนมาก/ฟังไม่รู้เรื่อง (ตัดตก)"
         elif audio_risk > 0:
-            audio_msg = "🔊 เสียงเพี้ยนคำนึง/พอฟังออก (อนุโลมให้ผ่าน)"
+            audio_msg = "🔊 เสียงเพี้ยนเล็กน้อย/พอฟังออก (อนุโลมให้ผ่าน)"
         
     except Exception:
         return 0.0, "⚠️ ไม่สามารถวิเคราะห์เสียงได้"
@@ -126,7 +124,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 80.0 # 💡 เปลี่ยนเกณฑ์การตัดตกเป็น 80% ตามที่คุณต้องการ
+        THRESHOLD = 80.0 
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -162,31 +160,30 @@ if uploaded_files:
                                 median_prob = float(np.median(frame_scores))
                                 mean_prob = float(np.mean(frame_scores))
                                 
-                                # 💡 กดคะแนนตั้งต้นลงให้อยู่ที่สูงสุดแค่ 20%
-                                base_score = min(20.0, (median_prob * 15.0) + (mean_prob * 5.0))
+                                # 💡 กดคะแนนตั้งต้นลงให้อยู่ที่สูงสุดแค่ 15% (คะแนนเผื่อให้คลิปรอดเยอะมาก)
+                                base_score = min(15.0, (median_prob * 10.0) + (mean_prob * 5.0))
                                 
                                 glitch_penalty = 0.0
                                 details_list = []
                                 
-                                # 💡 กฎ 1 วินาที (มือหาย/เงาแขนหาย/สินค้าไม่สมบูรณ์)
-                                # 6 เฟรม = 1 วินาที
+                                # 💡 กฎ 1 วินาทีแบบยืดหยุ่น (ต้องมั่นใจถึง 97.5% ว่าพังจริงๆ ถึงจะเริ่มนับ)
                                 max_severe = 0
                                 severe_count = 0
                                 for s in frame_scores:
-                                    if s > 0.95: # โมเดลมองว่าปลอมแน่นอน
+                                    if s > 0.975: # ขยับจาก 0.95 เป็น 0.975 (หลีกเลี่ยงการจำผิดว่ามือคนเป็น AI)
                                         severe_count += 1
                                         max_severe = max(max_severe, severe_count)
                                     else: 
                                         severe_count = 0
                                         
-                                if max_severe >= 6: # พังต่อเนื่อง 1 วินาทีขึ้นไป (ตัดออกเลย)
-                                    glitch_penalty += 65.0 # (20 + 65 = 85% ทะลุเกณฑ์ตกแน่นอน)
+                                if max_severe >= 6: # พังต่อเนื่อง 1 วินาที
+                                    glitch_penalty += 65.0 
                                     details_list.append("⚠️ อวัยวะเงากระจกหาย/สินค้าไม่สมบูรณ์ (เกิน 1 วิ)")
-                                elif max_severe >= 2: # กระตุกนิดๆ ไม่ถึงวิ (ปล่อยผ่านได้)
-                                    glitch_penalty += 15.0 # (20 + 15 = 35% ผ่านฉลุย)
+                                elif max_severe >= 2: # กระตุกนิดๆ ไม่ถึงวิ (ลดโทษลงเหลือแค่ 10%)
+                                    glitch_penalty += 10.0 
                                     details_list.append("ภาพ/อวัยวะกระตุกนิดๆ ไม่ถึงวิ (อนุโลม)")
                                 
-                                # 💡 ตรวจสอบเสียง (เพี้ยน 1 คำ VS เพี้ยน 2 คำ)
+                                # 💡 ตรวจสอบเสียง
                                 audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
                                 if audio_risk > 0:
                                     glitch_penalty += audio_risk
