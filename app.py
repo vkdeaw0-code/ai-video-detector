@@ -23,6 +23,7 @@ st.write("✨ **Smart Tolerance System:** อนุโลมจุดผิด�
 @st.cache_resource
 def load_detection_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ใช้ EfficientNet-B0 เพื่อความเร็ว (หากมีไฟล์ Weights .pth ที่เทรนมาเฉพาะ ให้โหลดเพิ่มที่นี่)
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
@@ -40,6 +41,8 @@ transform = transforms.Compose([
 # 2. ฟังก์ชันประมวลผล (ปรับให้เสถียรและเร็วขึ้น)
 # ==========================================
 def extract_frames(video_path, target_fps=3):
+    # เปลี่ยนจากการนับเฟรม (frame_interval) เป็นการดึงตามเวลา (target_fps) 
+    # ทำให้วิเคราะห์คลิป 30fps หรือ 60fps ได้มาตรฐานเดียวกัน (ดึง 3 เฟรม/วินาที)
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
@@ -54,6 +57,7 @@ def extract_frames(video_path, target_fps=3):
         if not ret: break
         
         if count % interval == 0:
+            # ย่อขนาดทันทีเพื่อเซฟ RAM
             frame_resized = cv2.resize(frame, (224, 224))
             rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
             frames.append(rgb_frame)
@@ -84,11 +88,12 @@ def analyze_audio_and_lipsync(video_path):
         fft_data = np.abs(np.fft.rfft(data_float))
         fft_sum = np.sum(fft_data)
         
+        # ค้นหาลักษณะเสียงสังเคราะห์ (Spectral Flatness)
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 5.0
+                audio_risk = 5.0 # แปลงเป็น 5% โดยตรง
         
     except Exception:
         pass
@@ -111,8 +116,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 75.0 
-        WARNING_THRESHOLD = 60.0
+        THRESHOLD = 75.0 # เกณฑ์ตัดตก (เกิน 75% = ไม่ผ่าน)
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -145,9 +149,13 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
+                                # --- 💡 การวิเคราะห์ความต่อเนื่อง (Temporal Logic) ---
                                 mean_prob = float(np.mean(frame_scores)) * 100
+                                
+                                # นับเฟรมที่คะแนนพุ่ง (มีความเสี่ยงว่าพัง/บิดเบี้ยว)
                                 suspect_frames = [1 if score > 0.65 else 0 for score in frame_scores]
                                 
+                                # หาช่วงเวลาที่พัง "ต่อเนื่อง" ยาวที่สุด
                                 max_consecutive = 0
                                 current_consecutive = 0
                                 for is_suspect in suspect_frames:
@@ -157,12 +165,16 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                         
+                                # คิดคะแนนพื้นฐานจากค่าเฉลี่ย
                                 base_score = mean_prob
                                 
+                                # เงื่อนไขให้อภัย vs งัดให้ตก
                                 if max_consecutive >= 3:
+                                    # พังต่อเนื่อง 3 เฟรมขึ้นไป (ประมาณ 1 วิ) = มือละลาย/ของหายชัดเจน -> งัดคะแนนให้ตก
                                     glitch_penalty = 35.0
                                     details = "พบภาพบิดเบี้ยว/ผิดปกติต่อเนื่อง"
                                 elif max_consecutive > 0:
+                                    # พังแค่ 1-2 เฟรม (เสี้ยววิ) = กล้องสั่น/เบลอ -> อนุโลม หักนิดเดียว
                                     glitch_penalty = 5.0
                                     details = "พบจุดแปลกเล็กน้อย (อนุโลมให้)"
                                 else:
@@ -170,21 +182,23 @@ if uploaded_files:
                                     details = "ภาพรวมแนบเนียน"
                                     
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path)
+                                
+                                # รวมคะแนน
                                 final_score = np.clip(base_score + glitch_penalty + audio_risk, 0.0, 100.0)
                                 
-                                # ปรับเงื่อนไขเพื่อแยกสถานะ 3 ระดับ
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **REJECT** ({final_score:.0f}%)", icon="🚨")
                                     st.write(f"*{details}*")
-                                elif final_score >= WARNING_THRESHOLD:
-                                    status = "WARNING"
-                                    st.warning(f"⚠️ **WARNING** ({final_score:.0f}%)", icon="⚠️")
-                                    st.write(f"*{details} (ผ่านหวุดหวิด)*")
                                 else:
                                     status = "PASS"
-                                    st.success(f"✅ **PASS** ({final_score:.0f}%)", icon="🟢")
-                                    st.write(f"*{details}*")
+                                    # ถ้าคะแนนคาบเส้น (60-74%) จะขึ้นเตือนสีส้มแบบผ่านหวุดหวิด
+                                    if final_score >= 60.0:
+                                        st.warning(f"✅ **PASS** ({final_score:.0f}%)", icon="⚠️")
+                                        st.write(f"*{details} (ผ่านหวุดหวิด)*")
+                                    else:
+                                        st.success(f"✅ **PASS** ({final_score:.0f}%)", icon="🟢")
+                                        st.write(f"*{details}*")
                                         
                                 st.progress(min(int(final_score), 100))
                                 
@@ -193,6 +207,7 @@ if uploaded_files:
                     finally:
                         if os.path.exists(video_path):
                             os.unlink(video_path)
+                        # ระบบคืนพื้นที่ RAM แบบถอนรากถอนโคน
                         if 'frames' in locals(): del frames
                         if 'frame_scores' in locals(): del frame_scores
                         gc.collect()
@@ -207,48 +222,25 @@ if uploaded_files:
                     })
         
         # ==========================================
-        # 4. แดชบอร์ดสรุปผลรวม 3 ระดับ
+        # 4. สรุปผลลัพธ์ภาพรวม (Dashboard)
         # ==========================================
         st.divider()
-        st.subheader("📋 แดชบอร์ดสรุปผลรวม")
+        st.subheader("📋 สรุปผลรวมทั้งหมด")
         df_all = pd.DataFrame(results_summary)
         
-        # แยก DataFrame ตามสถานะ
-        df_pass = df_all[df_all["สถานะ"] == "PASS"]
-        df_warning = df_all[df_all["สถานะ"] == "WARNING"]
-        df_reject = df_all[df_all["สถานะ"] == "REJECT"]
+        m1, m2, m3 = st.columns(3)
+        total_clips = len(df_all)
+        rejected_df = df_all[df_all["สถานะ"] == "REJECT"]
+        rejected_count = len(rejected_df)
+        pass_count = total_clips - rejected_count
+        reject_rate = (rejected_count / total_clips * 100) if total_clips > 0 else 0
         
-        # แสดงตัวเลขสรุป
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("จำนวนทั้งหมด", f"{len(df_all)} คลิป")
-        m2.metric("✅ ผ่าน", f"{len(df_pass)} คลิป")
-        m3.metric("⚠️ พอใช้ได้", f"{len(df_warning)} คลิป")
-        m4.metric("❌ ไม่ผ่านเลย", f"{len(df_reject)} คลิป")
+        m1.metric("จำนวนคลิปทั้งหมด", f"{total_clips} คลิป")
+        m2.metric("✅ ผ่าน (PASS)", f"{pass_count} คลิป")
+        m3.metric("❌ คัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}%", delta_color="inverse")
         
-        st.write("---")
-        
-        # สร้าง 3 คอลัมน์สำหรับโชว์ตารางแยกแต่ละประเภท
-        c1, c2, c3 = st.columns(3)
-        
-        with c1:
-            st.success("✅ คลิปที่ **ผ่าน** (<60%)")
-            if not df_pass.empty:
-                st.dataframe(df_pass[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง"]], hide_index=True, use_container_width=True)
-            else:
-                st.caption("ไม่มีคลิปในกลุ่มนี้")
-                
-        with c2:
-            st.warning("⚠️ คลิปที่ **พอใช้ได้** (60-74%)")
-            if not df_warning.empty:
-                st.dataframe(df_warning[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
-            else:
-                st.caption("ไม่มีคลิปในกลุ่มนี้")
-                
-        with c3:
-            st.error("❌ คลิปที่ **ไม่ผ่านเลย** (≥75%)")
-            if not df_reject.empty:
-                st.dataframe(df_reject[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
-            else:
-                st.caption("ไม่มีคลิปในกลุ่มนี้")
+        if not rejected_df.empty:
+            st.error("⚠️ รายชื่อคลิปที่ไม่ผ่านเกณฑ์:")
+            st.dataframe(rejected_df[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], use_container_width=True, hide_index=True)
         
         st.success("🎉 ตรวจสอบเสร็จสิ้น ระบบได้ล้างแคชเพื่อคืน RAM ให้กับเครื่องแล้ว")
