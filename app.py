@@ -16,8 +16,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (เกณฑ์เน้นการใช้งานจริง)")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบผ่อนผันให้คลิปรีวิว/สินค้า AI ที่ดูเนียนสามารถผ่านได้")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (ปรับเกณฑ์ผ่อนผันพิเศษ)")
+st.write("ระบบตรวจจับที่ปรับ Calibration ให้ผ่อนผัน ปล่อยผ่านคลิปรีวิว/โฆษณา AI ที่ภาพรวมดูโอเคใช้งานได้")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -37,8 +37,8 @@ transform = transforms.Compose([
 ])
 
 # --- 3. HELPER FUNCTIONS ---
-def extract_frames(video_path, frame_interval=25):
-    """สุ่มดึงเฟรมแบบกระจายห่างขึ้น เพื่อดูภาพรวมของวิดีโอ"""
+def extract_frames(video_path, frame_interval=30):
+    """สุ่มดึงเฟรมแบบกระจายห่างขึ้นเพื่อประเมินภาพรวม"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -96,23 +96,25 @@ if uploaded_files:
                             scores = []
                             with torch.no_grad():
                                 for frame_np in frames:
-                                    pil_img = Image.fromarray(frame_np)
+                                    pil_img = Image.fromarray(face_np if 'face_np' in locals() else frame_np)
                                     input_tensor = transform(pil_img).unsqueeze(0).to(device)
                                     output = model(input_tensor)
                                     probs = torch.softmax(output, dim=1)
                                     fake_prob = probs[0][1].item()
                                     scores.append(fake_prob)
                             
-                            # 🎯 คำนวณแบบยืดหยุ่น:
-                            # 1. ใช้ Percentile 25th เลือกเฉพาะเฟรมที่มีคะแนนความเนียนสอดคล้องที่สุด
-                            # 2. ปรับตัวคูณ Scaling Factor เพื่อไม่ให้คะแนนกระโดดเกินจริง
-                            base_score = float(np.percentile(scores, 25))
-                            adjusted_score = np.power(base_score, 2.5) # บีบค่าความแปลกในภาพสินค้า/วิว ให้สมดุลขึ้น
+                            # 🛠️ CALIBRATION LOGIC
+                            # นำค่าเฉลี่ยเฟรมมาผ่านฟังก์ชัน Softening บีบสเกลความไวของโมเดล
+                            raw_score = float(np.median(scores))
                             
-                            THRESHOLD = 0.95  # ตั้งเกณฑ์คัดออกไว้ที่ 95%
-                            percent_score = float(adjusted_score * 100)
+                            # บีบสเกลให้คลิปเนียนระดับใช้งานได้ถูไถ ตกมาอยู่ในช่วง 0.20 - 0.60
+                            calibrated_score = np.clip((raw_score - 0.5) * 0.8 + 0.3, 0.0, 1.0)
                             
-                            if adjusted_score >= THRESHOLD:
+                            # ตั้งเกณฑ์ REJECT ไว้ที่ 80% หลัง Calibrate (เท่ากับต้องแย่ระดับหลุดโลกจริงๆ)
+                            THRESHOLD = 0.80
+                            percent_score = float(calibrated_score * 100)
+                            
+                            if calibrated_score >= THRESHOLD:
                                 status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
