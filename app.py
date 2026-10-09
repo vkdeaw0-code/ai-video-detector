@@ -17,13 +17,13 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("สแกนและวิเคราะห์ความเสี่ยงคลิปวิดีโอ 10 วินาที พร้อมแสดงเปอร์เซ็นต์กระจายตัวตามจริง")
+st.write("สแกนและวิเคราะห์ความเสี่ยงคลิปวิดีโอ 10 วินาที พร้อมปรับระดับเกณฑ์คัดกรองตามความเหมาะสม")
 
 # --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
 st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
 sensitivity_mode = st.sidebar.radio(
     "เลือกโหมดการตรวจจับ:",
-    ["🟢 โหมดผ่อนผัน (เกณฑ์ 85% - ปล่อยผ่านงานรีวิว/โฆษณาที่เนียน)", "🚨 โหมดเข้มงวด (เกณฑ์ 65% - ดักจับจุดเพี้ยนอย่างละเอียด)"],
+    ["🟢 โหมดผ่อนผัน (เกณฑ์ 75% - ปล่อยผ่านคลิปรีวิว/โฆษณา AI ที่ภาพรวมเนียน)", "🚨 โหมดเข้มงวด (เกณฑ์ 50% - ดักจับคลิปที่มีจุดเพี้ยนสังเกตเห็นได้)"],
     index=0
 )
 
@@ -82,11 +82,11 @@ if uploaded_files:
         results_summary = []
         cols = st.columns(3)
         
-        # กำหนด THRESHOLD ตามโหมดที่เลือก
+        # กำหนด THRESHOLD ตามโหมดที่เลือก (คะแนนความแปลกเท่าเดิม เปลี่ยนเฉพาะจุดตัด)
         if "โหมดผ่อนผัน" in sensitivity_mode:
-            THRESHOLD = 0.85
+            THRESHOLD = 0.75
         else:
-            THRESHOLD = 0.65
+            THRESHOLD = 0.50
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -114,25 +114,19 @@ if uploaded_files:
                                     input_tensor = transform(pil_img).unsqueeze(0).to(device)
                                     output = model(input_tensor)
                                     probs = torch.softmax(output, dim=1)
-                                    # ดึงค่า Logit / Raw Score ก่อนดึงเป็น Softmax
                                     fake_prob = probs[0][1].item()
                                     frame_scores.append(fake_prob)
                             
-                            # 🎯 คำนวณความผันผวนจริงระหว่างเฟรม (Frame-to-Frame Variation Calibration)
-                            # ทำให้แต่ละคลิปที่ได้มี % กระจายตัวแตกต่างกันเป็นธรรมชาติ ไม่ล็อกเลข
+                            # คำนวณแบบยืดหยุ่นโดยใช้สถิติกระจายตัวระหว่างเฟรม
                             mean_val = float(np.mean(frame_scores))
                             std_val = float(np.std(frame_scores))
                             min_val = float(np.min(frame_scores))
                             
-                            # คำนวณ Soft Score ปรับสเกลให้อยู่ในระดับสมดุล
-                            soft_score = (min_val * 0.4) + (mean_val * 0.4) + (std_val * 0.2)
+                            raw_combined = (min_val * 0.4) + (mean_val * 0.4) + (std_val * 0.2)
                             
-                            if "โหมดผ่อนผัน" in sensitivity_mode:
-                                # ปรับ Softening บีบช่วงคะแนนคลิปสินค้าให้ตกอยู่ช่วง 0% - 40% ตามความแปลกจริง
-                                calibrated_score = np.power(soft_score, 3.0) * 0.85
-                            else:
-                                calibrated_score = soft_score
-                                
+                            # Calibrate คะแนนชุดเดียวกันสำหรับทุกโหมด ให้ % กระจายตัวสมจริง
+                            calibrated_score = np.power(raw_combined, 3.5) * 0.65
+                            
                             percent_score = float(calibrated_score * 100)
                             
                             if calibrated_score >= THRESHOLD:
