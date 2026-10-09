@@ -16,8 +16,8 @@ st.set_page_config(
     layout="centered"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที เพื่อวิเคราะห์โครงสร้างใบหน้าและสแกนหาความผิดปกติจาก Deepfake / GenAI")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (รองรับหลายไฟล์)")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ เพื่อสแกนหาความผิดปกติและคัดออกอัตโนมัติ")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -75,44 +75,57 @@ def extract_and_crop_faces(video_path, frame_interval=10):
     cap.release()
     return cropped_faces
 
-# --- 4. WEB UI INTERFACE ---
-uploaded_file = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi)", type=["mp4", "mov", "avi"])
+# --- 4. WEB UI INTERFACE (MULTI-FILE SUPPORT) ---
+# เปิดใช้งาน accept_multiple_files=True เพื่อรองรับการเลือกหลายคลิปพร้อมกัน
+uploaded_files = st.file_uploader(
+    "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันหลายไฟล์ได้", 
+    type=["mp4", "mov", "avi"],
+    accept_multiple_files=True
+)
 
-if uploaded_file is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
+if uploaded_files:
+    st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
     
-    st.video(uploaded_file)
-    
-    if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับ", type="primary"):
-        with st.spinner("กำลังวิเคราะห์เฟรมวิดีโอและสกัดโครงสร้างใบหน้า..."):
-            faces = extract_and_crop_faces(video_path)
+    if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
+        st.divider()
+        st.subheader("📊 ตารางสรุปผลการวิเคราะห์:")
+        
+        # วนลูปตรวจจับทีละคลิป
+        for idx, uploaded_file in enumerate(uploaded_files, 1):
+            st.markdown(f"### 🎬 คลิปที่ {idx}: `{uploaded_file.name}`")
             
-            if not faces:
-                st.warning("⚠️ ไม่พบใบหน้าบุคคลในวิดีโอ ไม่สามารถประมวลผลได้")
-            else:
-                scores = []
-                with torch.no_grad():
-                    for face_np in faces:
-                        pil_img = Image.fromarray(face_np)
-                        input_tensor = transform(pil_img).unsqueeze(0).to(device)
-                        output = model(input_tensor)
-                        probs = torch.softmax(output, dim=1)
-                        fake_prob = probs[0][1].item()
-                        scores.append(fake_prob)
+            # สร้างไฟล์ชั่วคราวเพื่ออ่านวิดีโอ
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            tfile.write(uploaded_file.read())
+            video_path = tfile.name
+            
+            with st.spinner(f"กำลังสแกนคลิปที่ {idx}/{len(uploaded_files)}..."):
+                faces = extract_and_crop_faces(video_path)
                 
-                avg_score = float(np.mean(scores))
-                THRESHOLD = 0.70
-                percent_score = avg_score * 100
-                
-                st.subheader("📊 ผลการวิเคราะห์คลิปวิดีโอ:")
-                
-                if avg_score >= THRESHOLD:
-                    st.error(f"❌ **REJECT (คัดออก)** - ตรวจพบร่องรอย AI สูงถึง **{percent_score:.2f}%**")
+                if not faces:
+                    st.warning("⚠️ ไม่พบใบหน้าบุคคลในวิดีโอ ไม่สามารถวิเคราะห์ได้")
                 else:
-                    st.success(f"✅ **PASS (ผ่าน)** - คลิปวิดีโอปกติ ค่าความผิดปกติ: **{percent_score:.2f}%**")
+                    scores = []
+                    with torch.no_grad():
+                        for face_np in faces:
+                            pil_img = Image.fromarray(face_np)
+                            input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                            output = model(input_tensor)
+                            probs = torch.softmax(output, dim=1)
+                            fake_prob = probs[0][1].item()
+                            scores.append(fake_prob)
                     
-                st.progress(min(int(percent_score), 100))
-                
-    os.unlink(video_path)
+                    avg_score = float(np.mean(scores))
+                    THRESHOLD = 0.70
+                    percent_score = avg_score * 100
+                    
+                    if avg_score >= THRESHOLD:
+                        st.error(f"❌ **REJECT (คัดออก)** - ความแปลก AI: **{percent_score:.2f}%**")
+                    else:
+                        st.success(f"✅ **PASS (ผ่าน)** - ความแปลก AI: **{percent_score:.2f}%**")
+                        
+                    st.progress(min(int(percent_score), 100))
+            
+            # ลบไฟล์ชั่วคราว
+            os.unlink(video_path)
+            st.divider()
