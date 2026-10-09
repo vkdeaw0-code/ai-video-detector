@@ -4,116 +4,198 @@ import torch
 import timm
 import numpy as np
 import tempfile
-import gc
+import os
+import pandas as pd
+import subprocess
+import imageio_ffmpeg
+from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
-import torch.nn.functional as F
 
-st.set_page_config(page_title="AI Video Detector", page_icon="🎥", layout="wide")
-st.title("🎥 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบวิเคราะห์ความผิดปกติของภาพ (ประเมินภาพรวมทั้งคลิป ลดความเข้มงวดเพื่อป้องกันคลิปจริงตกเกณฑ์)")
+st.set_page_config(page_title="ระบบตรวจจับคลิปวิดีโอ AI", page_icon="🎬", layout="wide")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
+st.write("ระบบเน้นความเสถียร (ปล่อยผ่านคลิป AI คุณภาพสูง คัดออกเฉพาะจุดพังฉับพลัน)")
 
 @st.cache_resource
-def load_model():
+def load_detection_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # แนะนำให้ใช้ pretrained=True เป็นฐานเริ่มต้น หากยังไม่มีไฟล์โมเดลที่เทรนมาเฉพาะเจาะจง
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
-    
-    # ⚠️ สำคัญมาก: หากคุณมีไฟล์ Weights ที่เทรนแยกมาสำหรับการจับ AI (Deepfake) 
-    # ให้เอาคอมเมนต์บรรทัดล่างออก แล้วใส่ path ของไฟล์ .pth
-    # model.load_state_dict(torch.load('your_ai_detector_weights.pth', map_location=device))
-    
     model = model.to(device)
     model.eval()
     return model, device
 
-model, device = load_model()
+model, device = load_detection_models()
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-uploaded_file = st.file_uploader("อัปโหลดวิดีโอของคุณที่นี่ (MP4, MOV, AVI)", type=['mp4', 'mov', 'avi'])
-
-if uploaded_file is not None:
-    st.info("กำลังประมวลผล... กรุณารอสักครู่")
-    progress_bar = st.progress(0)
-    
-    tfile = tempfile.NamedTemporaryFile(delete=False) 
-    tfile.write(uploaded_file.read())
-    
-    cap = cv2.VideoCapture(tfile.name)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    
-    # ดึงมาวิเคราะห์ 2 เฟรมต่อ 1 วินาที (เพื่อให้เห็นความต่อเนื่องมากขึ้น แต่ยังประมวลผลไว)
-    frames_to_skip = max(1, fps // 2)
-    
-    ai_probabilities = []
-    frame_count = 0
-    analyzed_frames = 0
-    
-    with torch.no_grad():
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            if frame_count % frames_to_skip == 0:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                
-                input_tensor = transform(pil_image).unsqueeze(0).to(device)
-                outputs = model(input_tensor)
-                probabilities = F.softmax(outputs, dim=1)
-                
-                ai_prob = probabilities[0][1].item() * 100
-                ai_probabilities.append(ai_prob)
-                analyzed_frames += 1
-                
-                progress = min(frame_count / total_frames, 1.0)
-                progress_bar.progress(progress)
-            
-            frame_count += 1
-            
-            if analyzed_frames % 50 == 0:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
+def extract_frames(video_path, frame_interval=10):
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    count = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: break
+        if count % frame_interval == 0:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(rgb_frame)
+        count += 1
     cap.release()
-    progress_bar.progress(1.0)
-    
-    # --- ส่วนตัดสินผล (ปรับให้ยืดหยุ่นและมีเหตุผลที่สุด) ---
-    if len(ai_probabilities) > 0:
-        avg_ai_prob = sum(ai_probabilities) / len(ai_probabilities)
-        
-        # กำหนดเกณฑ์ว่าเฟรมไหนเข้าข่าย "เสี่ยงสูง" (เกิน 80%)
-        high_risk_threshold = 80.0
-        high_risk_count = sum(1 for p in ai_probabilities if p > high_risk_threshold)
-        high_risk_percent = (high_risk_count / len(ai_probabilities)) * 100
-        
-        # เงื่อนไขการตก:
-        # 1. ค่าเฉลี่ยทั้งคลิปต้องเกิน 70% (ดูจากภาพรวม) OR
-        # 2. มีเฟรมที่เสี่ยงสูงเกิน 25% ของจำนวนเฟรมที่วิเคราะห์ทั้งหมด (ป้องกันการตกเพราะเฟรมเบลอแค่ 1-2 เฟรม)
-        if avg_ai_prob > 70.0 or high_risk_percent > 25.0:
-            st.error(f"❌ **ผลการตรวจสอบ: ไม่ผ่าน (วิดีโอมีลักษณะเข้าข่ายการสร้างด้วย AI)**")
-            st.write("### 📌 เหตุผลประกอบ:")
-            if avg_ai_prob > 70.0:
-                st.write(f"- **ภาพรวมของคลิปผิดธรรมชาติ:** ความเสี่ยงเฉลี่ยอยู่ที่ {avg_ai_prob:.2f}% (สูงกว่าเกณฑ์มาตรฐานที่ 70%)")
-            if high_risk_percent > 25.0:
-                st.write(f"- **พบจุดบิดเบี้ยวต่อเนื่อง:** ตรวจพบเฟรมที่มีความผิดปกติรุนแรงถึง {high_risk_percent:.1f}% ของคลิปทั้งหมด ({high_risk_count} จาก {analyzed_frames} เฟรม) ซึ่งมักไม่ใช่แค่การเบลอจากการถ่ายกล้องสั่น")
-        else:
-            st.success(f"✅ **ผลการตรวจสอบ: ผ่าน (วิดีโอมีความเป็นธรรมชาติ)**")
-            st.write("### 📌 เหตุผลประกอบ:")
-            st.write(f"- **ภาพรวมอยู่ในเกณฑ์ปลอดภัย:** ความเสี่ยงเฉลี่ยอยู่ที่ {avg_ai_prob:.2f}%")
-            if high_risk_count > 0:
-                st.write(f"- **อนุโลมจุดบกพร่องเล็กน้อย:** ตรวจพบเฟรมที่อาจดูผิดปกติบ้าง ({high_risk_count} เฟรม) แต่คิดเป็นเพียง {high_risk_percent:.1f}% ของคลิป ซึ่งสามารถเกิดขึ้นได้จากกล้องสั่นหรือการบีบอัดไฟล์ภาพตามธรรมชาติ")
-            else:
-                st.write("- วิดีโอมีความต่อเนื่องและไม่พบเฟรมที่มีความบิดเบี้ยวเลย")
+    return frames
+
+def analyze_audio_and_lipsync(video_path, frames):
+    audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+    audio_risk = 0.0
+    lip_sync_risk = 0.0
+    try:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        cmd = [
+            ffmpeg_exe, "-y", "-i", video_path,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            audio_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
+            return 0.0, 0.0
             
-        st.caption(f"ข้อมูลทางเทคนิค: วิเคราะห์ทั้งหมด {analyzed_frames} เฟรมหลัก")
-    else:
-        st.warning("ไม่สามารถวิเคราะห์วิดีโอนี้ได้ (วิดีโออาจสั้นเกินไปหรือไฟล์มีปัญหา)")
+        sample_rate, data = wavfile.read(audio_path)
+        if len(data) == 0:
+            os.unlink(audio_path)
+            return 0.0, 0.0
+            
+        data_float = data.astype(np.float32)
+        fft_data = np.abs(np.fft.rfft(data_float))
+        fft_sum = np.sum(fft_data)
+        
+        if fft_sum > 0:
+            normalized_fft = fft_data / fft_sum
+            spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
+            if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
+                audio_risk = 0.03  # ลดโทษเสียง AI ลงเหลือ 3%
+                
+        rms_energy = np.sqrt(np.mean(data_float**2))
+        if rms_energy > 500 and len(frames) > 2:
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            prev_mouth = None
+            motion_scores = []
+            for frame in frames:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
+                if len(faces) > 0:
+                    x, y, w, h = faces[0]
+                    mouth_roi = cv2.resize(gray[y + int(h/2):y+h, x:x+w], (64, 32))
+                    if prev_mouth is not None:
+                        diff = cv2.absdiff(mouth_roi, prev_mouth)
+                        motion_scores.append(np.mean(diff))
+                    prev_mouth = mouth_roi
+            if len(motion_scores) > 0:
+                avg_mouth_motion = np.mean(motion_scores)
+                if avg_mouth_motion < 2.0 and rms_energy > 1000:
+                    lip_sync_risk = 0.05 # ลดโทษปากแข็งเหลือ 5%
+                elif avg_mouth_motion < 4.0:
+                    lip_sync_risk = 0.02
+                    
+        os.unlink(audio_path)
+        return audio_risk, lip_sync_risk
+    except Exception:
+        if os.path.exists(audio_path):
+            os.unlink(audio_path)
+        return 0.0, 0.0
+
+uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi)", type=["mp4", "mov", "avi"], accept_multiple_files=True)
+
+if uploaded_files:
+    st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
+    if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
+        st.divider()
+        st.subheader("📊 ผลการวิเคราะห์:")
+        
+        results_summary = []
+        cols = st.columns(3)
+        THRESHOLD = 0.75 # ตั้งเกณฑ์ผ่านที่ 75%
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            col = cols[idx % 3]
+            with col:
+                with st.container(border=True):
+                    display_name = f"{uploaded_file.name[:20]}..." if len(uploaded_file.name) > 20 else uploaded_file.name
+                    st.caption(f"🎬 คลิปที่ {idx+1}: **{display_name}**")
+                    
+                    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+                    tfile.write(uploaded_file.read())
+                    video_path = tfile.name
+                    
+                    percent_score = 0.0
+                    status = "ERROR"
+                    
+                    try:
+                        with st.spinner("กำลังสแกน..."):
+                            frames = extract_frames(video_path)
+                            if not frames:
+                                st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
+                            else:
+                                frame_scores = []
+                                with torch.no_grad():
+                                    for frame_np in frames:
+                                        pil_img = Image.fromarray(frame_np)
+                                        input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                                        output = model(input_tensor)
+                                        probs = torch.softmax(output, dim=1)
+                                        frame_scores.append(probs[0][1].item())
+                                
+                                mean_val = float(np.mean(frame_scores))
+                                max_val = float(np.max(frame_scores))
+                                std_val = float(np.std(frame_scores))
+                                
+                                audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
+                                
+                                # ฐานคะแนนกดให้ต่ำลง (คลิป AI เนียนๆ จะได้คะแนนแถว 30-40%)
+                                base_score = (mean_val * 0.30) + (max_val * 0.15)
+                                
+                                # ตัวแปรชี้วัดความพัง: คลิปปกติค่า std_val จะต่ำ แต่ถ้ามีภาพกะพริบหรือมือหาย std_val จะสูงมาก
+                                glitch_penalty = std_val * 1.8 
+                                
+                                calibrated_score = base_score + glitch_penalty + audio_risk + lip_sync_risk
+                                percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
+                                
+                                if (percent_score / 100.0) >= THRESHOLD:
+                                    status = "REJECT"
+                                    st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
+                                else:
+                                    status = "PASS"
+                                    st.success(f"✅ **PASS** ({percent_score:.0f}%)", icon="🟢")
+                                    
+                                st.progress(min(int(percent_score), 100))
+                    except Exception as e:
+                        st.caption("⚠️ เกิดข้อผิดพลาด")
+                    finally:
+                        if os.path.exists(video_path):
+                            os.unlink(video_path)
+                    
+                    results_summary.append({
+                        "ลำดับ": idx + 1,
+                        "ชื่อไฟล์": uploaded_file.name,
+                        "คะแนนความเสี่ยง (%)": f"{percent_score:.2f}%",
+                        "สถานะ": status
+                    })
+        
+        st.divider()
+        df_all = pd.DataFrame(results_summary)
+        df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
+        
+        m1, m2, m3 = st.columns(3)
+        total_clips = len(df_all)
+        rejected_count = len(df_rejected)
+        pass_count = total_clips - rejected_count
+        reject_rate = (rejected_count / total_clips * 100) if total_clips > 0 else 0
+        
+        m1.metric("จำนวนคลิปทั้งหมด", f"{total_clips} คลิป")
+        m2.metric("จำนวนคลิปที่ผ่าน (PASS)", f"{pass_count} คลิป")
+        m3.metric("จำนวนคลิปที่ถูกคัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}%")
+        
+        if not df_rejected.empty:
+            st.error(f"⚠️ คลิปที่ไม่ผ่านเกณฑ์:")
+            st.dataframe(df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง (%)"]], use_container_width=True, hide_index=True)
