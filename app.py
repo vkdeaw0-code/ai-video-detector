@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบประเมินคุณภาพคลิปวิดีโอ AI")
-st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% **อัลกอริทึมลดคะแนนคลิปปกติให้ต่ำลง และจับผิดขั้นเด็ดขาดกับเคส 'อวัยวะจางหาย/บิดเบี้ยว'**")
+st.write("ระบบวิเคราะห์ภาพรวม (0-100%): ประเมินผล 2 ระดับ (ผ่าน/ไม่ผ่าน) ตัดตกที่ 75% **[เวอร์ชันอัลกอริทึมแยกส่วน] จับผิดการละลายของอวัยวะขั้นเด็ดขาด และปกป้องคลิปปกติไม่ให้ถูกปัดตก**")
 
 @st.cache_resource
 def load_detection_models():
@@ -39,7 +39,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. ฟังก์ชันประมวลผล 
 # ==========================================
-def extract_frames(video_path, target_fps=6): 
+def extract_frames(video_path, target_fps=8): 
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
@@ -155,7 +155,7 @@ if uploaded_files:
                     
                     try:
                         with st.spinner("กำลังสแกนวิเคราะห์..."):
-                            frames, motion_scores = extract_frames(video_path, target_fps=6)
+                            frames, motion_scores = extract_frames(video_path, target_fps=8)
                             
                             if not frames:
                                 st.caption("⚠️ ไม่สามารถอ่านภาพจากวิดีโอได้")
@@ -172,46 +172,56 @@ if uploaded_files:
                                 mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
                                 
-                                # 💡 1. ปรับฐานคะแนนลงให้คลิปปกติได้คะแนนต่ำลง (สูงสุดไม่เกิน 30%)
-                                base_score = (median_prob * 20.0) + (mean_prob * 10.0)
-                                
-                                # 💡 2. ปรับเกณฑ์จับผิดให้แม่นยำขึ้น
-                                glitch_thresh = min(0.95, max(0.85, median_prob + 0.15))
+                                # 💡 1. กดยอด Base Score: ปกป้องคลิปที่เนียนให้เริ่มต้นที่ 0-25% เท่านั้น
+                                base_score = min(25.0, (median_prob * 15.0) + (mean_prob * 10.0))
                                 
                                 glitch_penalty = 0.0
                                 details_list = []
                                 
-                                # ตรวจสอบ 1: ต้นคลิปพัง (หักเบาๆ 5% ไม่ทำให้ตก)
-                                early_probs = frame_scores[:6]
-                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 3:
-                                    glitch_penalty += 5.0
-                                
-                                # ตรวจสอบ 2: อวัยวะขาดหาย/ตัวจางวาร์ป (💡 จุดเปลี่ยนสำคัญ: เพิ่มความไวและบทลงโทษขั้นเด็ดขาด)
-                                avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
-                                morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > max(avg_motion * 2.5, 5.0)]) # ลดเกณฑ์ Motion เหลือ 2.5 เท่า จับมือหายได้ไวขึ้น
-                                
-                                if morph_count >= 2:
-                                    glitch_penalty += 50.0 # 💡 บวกหนักถึง 50% ทำให้คะแนนพุ่งเกิน 75% และตกทันที
-                                    details_list.append("⚠️ อวัยวะหรือสินค้าขาดหาย/บิดเบี้ยวรุนแรง")
-                                
-                                # ตรวจสอบ 3: ภาพละลายต่อเนื่อง
-                                suspect_frames = [1 if score > glitch_thresh else 0 for score in frame_scores]
-                                max_consecutive = 0
-                                current_consecutive = 0
-                                for is_suspect in suspect_frames:
-                                    if is_suspect:
-                                        current_consecutive += 1
-                                        max_consecutive = max(max_consecutive, current_consecutive)
+                                # 💡 2. ระบบ Critical Detection (จับมือหาย/ตัวละลาย โดยไม่ง้อ Motion)
+                                # ถ้าโมเดลฟันธงว่าเป็น Glitch แน่ๆ (>95%) ติดกัน 3 เฟรม ฟาดให้ตกทันที
+                                severe_thresh = 0.95
+                                severe_consecutive = 0
+                                max_severe = 0
+                                for score in frame_scores:
+                                    if score > severe_thresh:
+                                        severe_consecutive += 1
+                                        max_severe = max(max_severe, severe_consecutive)
                                     else:
-                                        current_consecutive = 0
-                                
-                                if max_consecutive >= 8: # ละลายแช่นานเกิน 1.3 วิ
+                                        severe_consecutive = 0
+                                        
+                                if max_severe >= 3:
+                                    glitch_penalty += 55.0 # +55% (รวมฐาน 25% กลายเป็น 80% ตกชัวร์)
+                                    details_list.append("⚠️ อวัยวะหรือเงาสะท้อนละลาย/ผิดรูปชัดเจน (Critical)")
+                                elif max_severe >= 2:
                                     glitch_penalty += 20.0
-                                    details_list.append("⚠️ ภาพพื้นหลังละลายต่อเนื่องชัดเจน")
-                                elif max_consecutive >= 5: # กระตุกเล็กน้อยหักนิดเดียว
-                                    glitch_penalty += 5.0
+                                    details_list.append("⚠️ พบจุดภาพละลายสั้นๆ")
+
+                                # 💡 3. ระบบจับภาพกระตุกฉับพลัน (Warping)
+                                # กรณีคะแนนพุ่งกระโดด (>85%) ร่วมกับมีการขยับเร็ว
+                                glitch_thresh = min(0.90, max(0.80, median_prob + 0.15))
+                                avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
+                                warp_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > max(avg_motion * 3.0, 5.0)])
                                 
-                                # ตรวจสอบ 4: เสียง
+                                if warp_count >= 2 and max_severe < 3: # ถ้าโดนจับ Critical ไปแล้วจะไม่ซ้ำเติมคะแนนตรงนี้
+                                    glitch_penalty += 15.0
+                                    details_list.append("⚠️ ภาพหรืออวัยวะกระตุกผิดธรรมชาติ")
+                                
+                                # 💡 4. ภาพละลายต่อเนื่องทั่วไป (Sustained Glitch)
+                                suspect_consecutive = 0
+                                max_suspect = 0
+                                for score in frame_scores:
+                                    if score > glitch_thresh:
+                                        suspect_consecutive += 1
+                                        max_suspect = max(max_suspect, suspect_consecutive)
+                                    else:
+                                        suspect_consecutive = 0
+                                
+                                if max_suspect >= 8 and max_severe < 3: # แช่นานเกิน 1 วิ
+                                    glitch_penalty += 25.0
+                                    details_list.append("⚠️ ภาพพื้นหลังละลายต่อเนื่อง")
+                                
+                                # 💡 5. ประเมินเสียง
                                 audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
                                 if audio_risk > 0:
                                     glitch_penalty += audio_risk
@@ -226,7 +236,7 @@ if uploaded_files:
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                 
-                                # ประเมินผล 2 ระดับ ตัดที่ 75%
+                                # ตัดเกรด
                                 if final_score >= THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **ไม่ผ่าน** ({final_score:.0f}%)")
