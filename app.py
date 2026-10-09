@@ -8,21 +8,20 @@ import os
 from PIL import Image
 from torchvision import transforms
 
-# --- 1. SET UP PAGE CONFIG ---
+# --- 1. SET UP PAGE CONFIG (ใช้แบบ Wide เพื่อให้แสดง Grid สวยงาม) ---
 st.set_page_config(
     page_title="ระบบตรวจจับคลิปวิดีโอ AI",
     page_icon="🎬",
-    layout="centered"
+    layout="wide" # ปรับหน้าจอให้กว้างเต็มตา
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (รองรับหลายไฟล์)")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ เพื่อสแกนหาความผิดปกติและคัดออกอัตโนมัติ")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบจะสรุปผลเป็นตารางการ์ดขนาดเล็ก")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
 def load_detection_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # โหลดโมเดลวิเคราะห์ภาพ AI
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
@@ -38,7 +37,6 @@ transform = transforms.Compose([
 
 # --- 3. HELPER FUNCTIONS ---
 def extract_frames(video_path, frame_interval=15):
-    """ดึงเฟรมภาพออกจากคลิปวิดีโอเพื่อวิเคราะห์โดยตรง"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -57,7 +55,7 @@ def extract_frames(video_path, frame_interval=15):
     cap.release()
     return frames
 
-# --- 4. WEB UI INTERFACE (MULTI-FILE SUPPORT) ---
+# --- 4. WEB UI INTERFACE (COMPACT GRID UI) ---
 uploaded_files = st.file_uploader(
     "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันหลายไฟล์ได้", 
     type=["mp4", "mov", "avi"],
@@ -69,41 +67,50 @@ if uploaded_files:
     
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ตารางสรุปผลการวิเคราะห์:")
+        st.subheader("📊 ผลการวิเคราะห์แบบกะทัดรัด:")
         
-        for idx, uploaded_file in enumerate(uploaded_files, 1):
-            st.markdown(f"### 🎬 คลิปที่ {idx}: `{uploaded_file.name}`")
+        # สร้างคอลัมน์แบบ Grid (3 คอลัมน์ต่อ 1 แถว)
+        cols = st.columns(3)
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            # สลับแสดงผลลงในคอลัมน์ 0, 1, 2
+            col = cols[idx % 3]
             
-            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-            tfile.write(uploaded_file.read())
-            video_path = tfile.name
-            
-            with st.spinner(f"กำลังสแกนคลิปที่ {idx}/{len(uploaded_files)}..."):
-                frames = extract_frames(video_path)
-                
-                if not frames:
-                    st.warning("⚠️ ไม่สามารถอ่านเฟรมจากไฟล์วิดีโอนี้ได้")
-                else:
-                    scores = []
-                    with torch.no_grad():
-                        for frame_np in frames:
-                            pil_img = Image.fromarray(frame_np)
-                            input_tensor = transform(pil_img).unsqueeze(0).to(device)
-                            output = model(input_tensor)
-                            probs = torch.softmax(output, dim=1)
-                            fake_prob = probs[0][1].item()
-                            scores.append(fake_prob)
+            with col:
+                # สร้างกล่องการ์ดสำหรับแต่ละคลิป
+                with st.container(border=True):
+                    st.caption(f"🎬 คลิปที่ {idx+1}: **{uploaded_file.name[:20]}...**" if len(uploaded_file.name) > 20 else f"🎬 คลิปที่ {idx+1}: **{uploaded_file.name}**")
                     
-                    avg_score = float(np.mean(scores))
-                    THRESHOLD = 0.70
-                    percent_score = avg_score * 100
+                    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+                    tfile.write(uploaded_file.read())
+                    video_path = tfile.name
                     
-                    if avg_score >= THRESHOLD:
-                        st.error(f"❌ **REJECT (คัดออก)** - ความแปลก AI: **{percent_score:.2f}%**")
-                    else:
-                        st.success(f"✅ **PASS (ผ่าน)** - ความแปลก AI: **{percent_score:.2f}%**")
+                    with st.spinner("กำลังสแกน..."):
+                        frames = extract_frames(video_path)
                         
-                    st.progress(min(int(percent_score), 100))
-            
-            os.unlink(video_path)
-            st.divider()
+                        if not frames:
+                            st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
+                        else:
+                            scores = []
+                            with torch.no_grad():
+                                for frame_np in frames:
+                                    pil_img = Image.fromarray(frame_np)
+                                    input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                                    output = model(input_tensor)
+                                    probs = torch.softmax(output, dim=1)
+                                    fake_prob = probs[0][1].item()
+                                    scores.append(fake_prob)
+                            
+                            avg_score = float(np.mean(scores))
+                            THRESHOLD = 0.70
+                            percent_score = avg_score * 100
+                            
+                            # แสดงผลเป็นไอคอนเล็กขนาดกะทัดรัด
+                            if avg_score >= THRESHOLD:
+                                st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
+                            else:
+                                st.success(f"✅ **PASS** ({percent_score:.0f}%)", icon="🟢")
+                                
+                            st.progress(min(int(percent_score), 100))
+                    
+                    os.unlink(video_path)
