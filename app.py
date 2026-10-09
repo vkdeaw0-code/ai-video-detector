@@ -14,7 +14,7 @@ from torchvision import transforms
 
 st.set_page_config(page_title="ระบบตรวจจับคลิปวิดีโอ AI", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบเน้นความเสถียร (คัดออกเมื่อมีวัตถุหายฉับพลัน มือบิดเบี้ยว หรือจุดพังรุนแรง)")
+st.write("ระบบเน้นความเสถียร (ปล่อยผ่านคลิป AI คุณภาพสูง คัดออกเฉพาะจุดพังฉับพลัน)")
 
 @st.cache_resource
 def load_detection_models():
@@ -74,7 +74,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.03 
+                audio_risk = 0.03  # ลดโทษเสียง AI ลงเหลือ 3%
                 
         rms_energy = np.sqrt(np.mean(data_float**2))
         if rms_energy > 500 and len(frames) > 2:
@@ -94,7 +94,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             if len(motion_scores) > 0:
                 avg_mouth_motion = np.mean(motion_scores)
                 if avg_mouth_motion < 2.0 and rms_energy > 1000:
-                    lip_sync_risk = 0.05 
+                    lip_sync_risk = 0.05 # ลดโทษปากแข็งเหลือ 5%
                 elif avg_mouth_motion < 4.0:
                     lip_sync_risk = 0.02
                     
@@ -115,7 +115,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 0.75 
+        THRESHOLD = 0.75 # ตั้งเกณฑ์ผ่านที่ 75%
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -152,28 +152,13 @@ if uploaded_files:
                                 
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                                 
-                                # 💡 เพิ่มระบบดักจับวัตถุหาย (Temporal Glitch Detection)
-                                temporal_penalty = 0.0
-                                if len(frames) > 2:
-                                    pixel_diffs = []
-                                    for i in range(1, len(frames)):
-                                        gray1 = cv2.cvtColor(frames[i-1], cv2.COLOR_RGB2GRAY)
-                                        gray2 = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
-                                        diff = np.mean(cv2.absdiff(gray1, gray2))
-                                        pixel_diffs.append(diff)
-                                    
-                                    if len(pixel_diffs) > 0:
-                                        max_diff = np.max(pixel_diffs)
-                                        median_diff = np.median(pixel_diffs)
-                                        # ถ้าจู่ๆ เฟรมมีการเปลี่ยนแปลงรุนแรง (วัตถุหาย) จะดันคะแนนขึ้นทันที 25%
-                                        if median_diff < 15.0 and max_diff > (median_diff * 3.5):
-                                            temporal_penalty = 0.25 
-                                
+                                # ฐานคะแนนกดให้ต่ำลง (คลิป AI เนียนๆ จะได้คะแนนแถว 30-40%)
                                 base_score = (mean_val * 0.30) + (max_val * 0.15)
+                                
+                                # ตัวแปรชี้วัดความพัง: คลิปปกติค่า std_val จะต่ำ แต่ถ้ามีภาพกะพริบหรือมือหาย std_val จะสูงมาก
                                 glitch_penalty = std_val * 1.8 
                                 
-                                # รวมคะแนนทั้งหมด
-                                calibrated_score = base_score + glitch_penalty + audio_risk + lip_sync_risk + temporal_penalty
+                                calibrated_score = base_score + glitch_penalty + audio_risk + lip_sync_risk
                                 percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
                                 
                                 if (percent_score / 100.0) >= THRESHOLD:
