@@ -5,3 +5,6 @@ opencv-python-headless
 timm
 Pillow
 numpy
+pandas
+librosa
+moviepy
