@@ -16,8 +16,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ เพื่อสแกนหาความผิดปกติและคัดออกอัตโนมัติ")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (เกณฑ์ระดับกลาง - ผ่อนผัน)")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบตรวจจับโดยเน้นปล่อยผ่านคลิปที่ดูเนียน/ถูไถได้")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -37,7 +37,7 @@ transform = transforms.Compose([
 ])
 
 # --- 3. HELPER FUNCTIONS ---
-def extract_frames(video_path, frame_interval=15):
+def extract_frames(video_path, frame_interval=20): # เพิ่มช่วงห่างเฟรมเพื่อสุ่มตรวจภาพรวม
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -68,9 +68,8 @@ if uploaded_files:
     
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ผลการวิเคราะห์แบบกะทัดรัด:")
+        st.subheader("📊 ผลการวิเคราะห์แบบกะทัดรัด (เกณฑ์ผ่อนผัน):")
         
-        # รายการสำหรับเก็บข้อมูลทำ Dashboard
         results_summary = []
         cols = st.columns(3)
         
@@ -103,11 +102,15 @@ if uploaded_files:
                                     fake_prob = probs[0][1].item()
                                     scores.append(fake_prob)
                             
-                            avg_score = float(np.mean(scores))
-                            THRESHOLD = 0.70
-                            percent_score = avg_score * 100
+                            # คำนวณแบบใช้มัธยฐาน (Median) แทนเฉลี่ย (Mean) ช่วยลดผลกระทบจากเฟรมที่เพี้ยนแค่จุดเดียว
+                            robust_score = float(np.median(scores))
                             
-                            if avg_score >= THRESHOLD:
+                            # 🎯 ปรับเพิ่ม THRESHOLD เป็น 0.85 (85%)
+                            # คลิปที่ความแปลก 70-84% ที่เคยโดนคัดออก จะได้รับการผ่อนผันให้ PASS ทันที
+                            THRESHOLD = 0.85
+                            percent_score = robust_score * 100
+                            
+                            if robust_score >= THRESHOLD:
                                 status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
@@ -118,7 +121,6 @@ if uploaded_files:
                     
                     os.unlink(video_path)
                     
-                    # บันทึกข้อมูลผลลัพธ์ลง List
                     results_summary.append({
                         "ลำดับ": idx + 1,
                         "ชื่อไฟล์": uploaded_file.name,
@@ -126,14 +128,13 @@ if uploaded_files:
                         "สถานะ": status
                     })
         
-        # --- 5. REJECTED CLIPS DASHBOARD (แสดงผลต่อท้าย) ---
+        # --- 5. REJECTED CLIPS DASHBOARD ---
         st.divider()
         st.header("🚫 แดชบอร์ดสรุปคลิปที่ไม่ผ่านการคัดกรอง (Rejected Clips Dashboard)")
         
         df_all = pd.DataFrame(results_summary)
         df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
         
-        # แสดง Metric สถิติภาพรวม
         m1, m2, m3 = st.columns(3)
         total_clips = len(df_all)
         rejected_count = len(df_rejected)
@@ -148,7 +149,6 @@ if uploaded_files:
         
         if not df_rejected.empty:
             st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป ดังรายการด้านล่าง:")
-            # แสดงตารางเฉพาะคลิปที่ REJECT
             st.dataframe(
                 df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)"]], 
                 use_container_width=True,
