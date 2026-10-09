@@ -18,7 +18,7 @@ from torchvision import transforms
 # ==========================================
 st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบประเมินความสมจริง: วิเคราะห์คะแนนตามจริง (1-100%) พร้อมชี้แจงจุดบกพร่องทุกองค์ประกอบ")
+st.write("ระบบประเมินความสมจริง: สมดุลใหม่ (ลดความเข้มงวด) วิเคราะห์ตามจริง 1-100% ปล่อยผ่านคลิปเนียน ปัดตกเฉพาะที่พังชัดเจน")
 
 @st.cache_resource
 def load_detection_models():
@@ -173,33 +173,33 @@ if uploaded_files:
                                 mean_prob = float(np.mean(frame_scores))
                                 median_prob = float(np.median(frame_scores))
                                 
-                                # 💡 Base Score (สเกล 0-100% ตามภาพที่โมเดลเห็นจริง)
-                                base_score = (median_prob * 60.0) + (mean_prob * 40.0)
+                                # 💡 ปรับ Base Score ให้น้อยลง (คลิปปกติแม้ใช้ฟิลเตอร์จะได้แค่ 20-45%)
+                                base_score = (median_prob * 45.0) + (mean_prob * 25.0)
                                 
-                                # 💡 เกณฑ์การจับผิด (เริ่มที่ 85% ถึงจะมองว่าพังชัดเจน)
-                                glitch_thresh = min(0.95, max(0.85, median_prob + 0.15))
+                                # 💡 เพดานจับผิดสูงขึ้น (ต้องมั่นใจระดับ 90% ขึ้นไปเท่านั้นถึงจะเรียกว่า Glitch)
+                                glitch_thresh = min(0.96, max(0.90, median_prob + 0.20))
                                 
                                 glitch_penalty = 0.0
                                 defect_count = 0
                                 details_list = []
                                 
-                                # 1. ต้นคลิป
+                                # 1. ต้นคลิป (ต้องเจอพังติดกันถึง 3 ใน 6 เฟรมแรกถึงจะหักคะแนน)
                                 early_probs = frame_scores[:6]
-                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 2:
+                                if sum([1 for p in early_probs if p > glitch_thresh]) >= 3:
                                     defect_count += 1
                                     glitch_penalty += 10.0
                                     details_list.append("รูปร่างบิดเบี้ยวตั้งแต่ต้นคลิป")
                                 
-                                # 2. การละลาย/อวัยวะผิดรูปฉับพลัน
+                                # 2. การละลาย/อวัยวะผิดรูปฉับพลัน (ต้องพังรุนแรง 4 เท่าของการขยับปกติ)
                                 avg_motion = np.mean(motion_scores) if len(motion_scores) > 0 else 0
-                                morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 3.5)])
+                                morph_count = sum([1 for i in range(1, len(frame_scores)) if frame_scores[i] > glitch_thresh and motion_scores[i] > (avg_motion * 4.0)])
                                 
                                 if morph_count >= 2:
                                     defect_count += 1
-                                    glitch_penalty += 15.0
+                                    glitch_penalty += 12.0
                                     details_list.append("อวัยวะหรือสินค้าผิดรูปฉับพลัน (ขาขาด/มือหาย)")
                                 
-                                # 3. บิดเบี้ยวต่อเนื่อง
+                                # 3. บิดเบี้ยวต่อเนื่อง (เพิ่มความอนุโลม ต้องพังนานกว่า 1.5 วินาทีถึงจะหักหนัก)
                                 suspect_frames = [1 if score > glitch_thresh else 0 for score in frame_scores]
                                 max_consecutive = 0
                                 current_consecutive = 0
@@ -210,12 +210,12 @@ if uploaded_files:
                                     else:
                                         current_consecutive = 0
                                 
-                                if max_consecutive >= 5: 
+                                if max_consecutive >= 8: # ที่ 6fps = 1.3 วินาที
                                     defect_count += 1
                                     glitch_penalty += 15.0
                                     details_list.append("ภาพพื้นหลังหรือวัตถุละลายต่อเนื่อง")
-                                elif max_consecutive >= 3:
-                                    glitch_penalty += 5.0
+                                elif max_consecutive >= 4:
+                                    glitch_penalty += 5.0 # หักเบาๆ สำหรับคลิปที่กระตุกแป๊บเดียว
                                 
                                 # 4. เสียง
                                 audio_risk, audio_msg = analyze_audio_and_lipsync(video_path)
@@ -224,9 +224,9 @@ if uploaded_files:
                                     if audio_msg:
                                         details_list.append(audio_msg)
                                     
-                                # 5. กฎคัดออก (พังหลายองค์ประกอบ)
+                                # 5. กฎคัดออก (เจอข้อบกพร่องชัดๆ 3 อย่างพร้อมกัน)
                                 if defect_count >= 3:
-                                    glitch_penalty += 20.0
+                                    glitch_penalty += 15.0
                                     details_list.append("องค์ประกอบวิดีโอผิดปกติรุนแรงหลายจุด")
                                 
                                 # สรุปผล
@@ -296,7 +296,7 @@ if uploaded_files:
         with c1:
             st.success("✅ คลิปที่ **ผ่าน** (<50%)")
             if not df_pass.empty:
-                st.dataframe(df_pass[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง"]], hide_index=True, use_container_width=True)
+                st.dataframe(df_pass[["ลำดับ", "ชื่อไฟล์", "ความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
             else:
                 st.caption("ไม่มีคลิปในกลุ่มนี้")
                 
