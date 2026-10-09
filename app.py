@@ -6,8 +6,9 @@ import numpy as np
 import tempfile
 import os
 import pandas as pd
-import librosa
-from moviepy.editor import VideoFileClip
+import subprocess
+import imageio_ffmpeg
+from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
 
@@ -68,38 +69,47 @@ def extract_frames(video_path, frame_interval=20):
     return frames
 
 def analyze_audio_artifacts(video_path):
-    """สกัดและตรวจจับคลื่นความถี่เสียงสังเคราะห์ AI (TTS / Voice Clone)"""
+    """สกัดและตรวจจับคลื่นความถี่เสียงสังเคราะห์ AI โดยใช้ ffmpeg & scipy"""
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     try:
-        # สกัดเสียงจากวิดีโอด้วย MoviePy
-        video = VideoFileClip(video_path)
-        if video.audio is None:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        # สกัดเสียงเฉพาะเป็น WAV 16kHz Mono
+        cmd = [
+            ffmpeg_exe, "-y", "-i", video_path,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            audio_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
             return 0.0 # คลิปไม่มีเสียง
             
-        video.audio.write_audiofile(audio_path, verbose=False, logger=None)
-        video.close()
-        
-        # วิเคราะห์ลักษณะสัญญาณเสียงด้วย Librosa
-        y, sr = librosa.load(audio_path, sr=None)
-        if len(y) == 0:
+        sample_rate, data = wavfile.read(audio_path)
+        if len(data) == 0:
+            os.unlink(audio_path)
             return 0.0
             
-        # 1. วิเคราะห์ Spectral Flatness (เสียง AI มักมีความถี่ราบเรียบและคงที่ผิดธรรมชาติ)
-        flatness = np.mean(librosa.feature.spectral_flatness(y=y))
+        # คำนวณ Spectral Energy Distribution เพื่อหาค่าเสียงสังเคราะห์ AI
+        data_float = data.astype(np.float32)
+        fft_data = np.abs(np.fft.rfft(data_float))
         
-        # 2. วิเคราะห์ Spectral Rolloff (ขอบเขตความถี่เสียงพากย์)
-        rolloff = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))
+        # เสียงสังเคราะห์มักมี Flatness สเปกตรัมช่วงความถี่สูงคงที่ผิดธรรมชาติ
+        fft_sum = np.sum(fft_data)
+        if fft_sum == 0:
+            os.unlink(audio_path)
+            return 0.0
+            
+        normalized_fft = fft_data / fft_sum
+        spectral_flatness = np.exp(np.mean(np.log(normalized_fft + 1e-12)))
         
-        audio_score = 0.0
-        if flatness < 0.001 or flatness > 0.05: # เสียงสังเคราะห์หลุดช่วงธรรมชาติ
-            audio_score += 0.25
-        if rolloff > 8000: # ความถี่สูงลอยแบบดนตรี/เสียงสังเคราะห์ดิจิทัล
-            audio_score += 0.20
+        audio_risk = 0.0
+        if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
+            audio_risk = 0.25
             
         os.unlink(audio_path)
-        return min(audio_score, 0.4)
+        return audio_risk
         
-    except Exception as e:
+    except Exception:
         if os.path.exists(audio_path):
             os.unlink(audio_path)
         return 0.0
@@ -152,7 +162,7 @@ if uploaded_files:
                             
                             image_raw_score = float(np.median(scores))
                             
-                            # 2. ตรวจจับเสียง AI ด้วย Librosa
+                            # 2. ตรวจจับเสียง AI
                             audio_risk_score = analyze_audio_artifacts(video_path)
                             
                             # 🎯 คำนวณคะแนนรวม (ภาพ + เสียง) ตามโหมดที่เลือก
