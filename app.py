@@ -16,8 +16,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (เกณฑ์ระดับกลาง - ผ่อนผัน)")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบตรวจจับโดยเน้นปล่อยผ่านคลิปที่ดูเนียน/ถูไถได้")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (เกณฑ์เน้นการใช้งานจริง)")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบผ่อนผันให้คลิปรีวิว/สินค้า AI ที่ดูเนียนสามารถผ่านได้")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -37,7 +37,8 @@ transform = transforms.Compose([
 ])
 
 # --- 3. HELPER FUNCTIONS ---
-def extract_frames(video_path, frame_interval=20): # เพิ่มช่วงห่างเฟรมเพื่อสุ่มตรวจภาพรวม
+def extract_frames(video_path, frame_interval=25):
+    """สุ่มดึงเฟรมแบบกระจายห่างขึ้น เพื่อดูภาพรวมของวิดีโอ"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -68,7 +69,7 @@ if uploaded_files:
     
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ผลการวิเคราะห์แบบกะทัดรัด (เกณฑ์ผ่อนผัน):")
+        st.subheader("📊 ผลการวิเคราะห์แบบกะทัดรัด:")
         
         results_summary = []
         cols = st.columns(3)
@@ -102,15 +103,16 @@ if uploaded_files:
                                     fake_prob = probs[0][1].item()
                                     scores.append(fake_prob)
                             
-                            # คำนวณแบบใช้มัธยฐาน (Median) แทนเฉลี่ย (Mean) ช่วยลดผลกระทบจากเฟรมที่เพี้ยนแค่จุดเดียว
-                            robust_score = float(np.median(scores))
+                            # 🎯 คำนวณแบบยืดหยุ่น:
+                            # 1. ใช้ Percentile 25th เลือกเฉพาะเฟรมที่มีคะแนนความเนียนสอดคล้องที่สุด
+                            # 2. ปรับตัวคูณ Scaling Factor เพื่อไม่ให้คะแนนกระโดดเกินจริง
+                            base_score = float(np.percentile(scores, 25))
+                            adjusted_score = np.power(base_score, 2.5) # บีบค่าความแปลกในภาพสินค้า/วิว ให้สมดุลขึ้น
                             
-                            # 🎯 ปรับเพิ่ม THRESHOLD เป็น 0.85 (85%)
-                            # คลิปที่ความแปลก 70-84% ที่เคยโดนคัดออก จะได้รับการผ่อนผันให้ PASS ทันที
-                            THRESHOLD = 0.85
-                            percent_score = robust_score * 100
+                            THRESHOLD = 0.95  # ตั้งเกณฑ์คัดออกไว้ที่ 95%
+                            percent_score = float(adjusted_score * 100)
                             
-                            if robust_score >= THRESHOLD:
+                            if adjusted_score >= THRESHOLD:
                                 status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
