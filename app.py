@@ -5,6 +5,7 @@ import timm
 import numpy as np
 import tempfile
 import os
+import urllib.request
 from PIL import Image
 from torchvision import transforms
 
@@ -26,8 +27,13 @@ def load_detection_models():
     model = model.to(device)
     model.eval()
     
-    # โหลดตัวตรวจจับใบหน้ามาตรฐานของ OpenCV (Haar Cascade)
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    # ดาวน์โหลดไฟล์ cascade แบบตรงหากไม่พบในระบบ
+    cascade_filename = "haarcascade_frontalface_default.xml"
+    if not os.path.exists(cascade_filename):
+        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+        urllib.request.urlretrieve(url, cascade_filename)
+        
+    face_cascade = cv2.CascadeClassifier(cascade_filename)
     return model, face_cascade, device
 
 model, face_cascade, device = load_detection_models()
