@@ -5,18 +5,19 @@ import timm
 import numpy as np
 import tempfile
 import os
+import pandas as pd
 from PIL import Image
 from torchvision import transforms
 
-# --- 1. SET UP PAGE CONFIG (ใช้แบบ Wide เพื่อให้แสดง Grid สวยงาม) ---
+# --- 1. SET UP PAGE CONFIG ---
 st.set_page_config(
     page_title="ระบบตรวจจับคลิปวิดีโอ AI",
     page_icon="🎬",
-    layout="wide" # ปรับหน้าจอให้กว้างเต็มตา
+    layout="wide"
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบจะสรุปผลเป็นตารางการ์ดขนาดเล็ก")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ เพื่อสแกนหาความผิดปกติและคัดออกอัตโนมัติ")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -55,7 +56,7 @@ def extract_frames(video_path, frame_interval=15):
     cap.release()
     return frames
 
-# --- 4. WEB UI INTERFACE (COMPACT GRID UI) ---
+# --- 4. WEB UI INTERFACE ---
 uploaded_files = st.file_uploader(
     "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันหลายไฟล์ได้", 
     type=["mp4", "mov", "avi"],
@@ -69,15 +70,14 @@ if uploaded_files:
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์แบบกะทัดรัด:")
         
-        # สร้างคอลัมน์แบบ Grid (3 คอลัมน์ต่อ 1 แถว)
+        # รายการสำหรับเก็บข้อมูลทำ Dashboard
+        results_summary = []
         cols = st.columns(3)
         
         for idx, uploaded_file in enumerate(uploaded_files):
-            # สลับแสดงผลลงในคอลัมน์ 0, 1, 2
             col = cols[idx % 3]
             
             with col:
-                # สร้างกล่องการ์ดสำหรับแต่ละคลิป
                 with st.container(border=True):
                     st.caption(f"🎬 คลิปที่ {idx+1}: **{uploaded_file.name[:20]}...**" if len(uploaded_file.name) > 20 else f"🎬 คลิปที่ {idx+1}: **{uploaded_file.name}**")
                     
@@ -90,6 +90,8 @@ if uploaded_files:
                         
                         if not frames:
                             st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
+                            status = "ERROR"
+                            percent_score = 0
                         else:
                             scores = []
                             with torch.no_grad():
@@ -105,12 +107,53 @@ if uploaded_files:
                             THRESHOLD = 0.70
                             percent_score = avg_score * 100
                             
-                            # แสดงผลเป็นไอคอนเล็กขนาดกะทัดรัด
                             if avg_score >= THRESHOLD:
+                                status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
+                                status = "PASS"
                                 st.success(f"✅ **PASS** ({percent_score:.0f}%)", icon="🟢")
                                 
                             st.progress(min(int(percent_score), 100))
                     
                     os.unlink(video_path)
+                    
+                    # บันทึกข้อมูลผลลัพธ์ลง List
+                    results_summary.append({
+                        "ลำดับ": idx + 1,
+                        "ชื่อไฟล์": uploaded_file.name,
+                        "คะแนนความแปลก AI (%)": f"{percent_score:.2f}%",
+                        "สถานะ": status
+                    })
+        
+        # --- 5. REJECTED CLIPS DASHBOARD (แสดงผลต่อท้าย) ---
+        st.divider()
+        st.header("🚫 แดชบอร์ดสรุปคลิปที่ไม่ผ่านการคัดกรอง (Rejected Clips Dashboard)")
+        
+        df_all = pd.DataFrame(results_summary)
+        df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
+        
+        # แสดง Metric สถิติภาพรวม
+        m1, m2, m3 = st.columns(3)
+        total_clips = len(df_all)
+        rejected_count = len(df_rejected)
+        pass_count = total_clips - rejected_count
+        reject_rate = (rejected_count / total_clips * 100) if total_clips > 0 else 0
+        
+        m1.metric("จำนวนคลิปทั้งหมด", f"{total_clips} คลิป")
+        m2.metric("จำนวนคลิปที่ผ่าน (PASS)", f"{pass_count} คลิป")
+        m3.metric("จำนวนคลิปที่ถูกคัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}% อัตราการคัดออก", delta_color="inverse")
+        
+        st.write("")
+        
+        if not df_rejected.empty:
+            st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป ดังรายการด้านล่าง:")
+            # แสดงตารางเฉพาะคลิปที่ REJECT
+            st.dataframe(
+                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)"]], 
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.balloons()
+            st.success("🎉 ยินดีด้วย! ไม่พบคลิปที่ติดสถานะ REJECT ในรอบนี้ ทุกคลิปผ่านการคัดกรองทั้งหมด")
