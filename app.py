@@ -8,17 +8,22 @@ import os
 import pandas as pd
 import subprocess
 import imageio_ffmpeg
+import gc
 from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
 
-st.set_page_config(page_title="ระบบตรวจจับคลิปวิดีโอ AI", page_icon="🎬", layout="wide")
+# ==========================================
+# 1. ตั้งค่าและเตรียมโมเดล
+# ==========================================
+st.set_page_config(page_title="AI Video Detector", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบเน้นความเสถียร (ปล่อยผ่านคลิป AI คุณภาพสูง คัดออกเฉพาะจุดพังฉับพลัน)")
+st.write("✨ **Smart Tolerance System:** อนุโลมจุดผิดปกติเสี้ยววินาที แต่ปัดตกทันทีหากภาพ/มือบิดเบี้ยวต่อเนื่องนานเกินไป")
 
 @st.cache_resource
 def load_detection_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ใช้ EfficientNet-B0 เพื่อความเร็ว (หากมีไฟล์ Weights .pth ที่เทรนมาเฉพาะ ให้โหลดเพิ่มที่นี่)
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
@@ -32,24 +37,37 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-def extract_frames(video_path, frame_interval=10):
+# ==========================================
+# 2. ฟังก์ชันประมวลผล (ปรับให้เสถียรและเร็วขึ้น)
+# ==========================================
+def extract_frames(video_path, target_fps=3):
+    # เปลี่ยนจากการนับเฟรม (frame_interval) เป็นการดึงตามเวลา (target_fps) 
+    # ทำให้วิเคราะห์คลิป 30fps หรือ 60fps ได้มาตรฐานเดียวกัน (ดึง 3 เฟรม/วินาที)
     cap = cv2.VideoCapture(video_path)
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
+    if video_fps <= 0: video_fps = 30
+    
+    interval = int(video_fps / target_fps)
+    if interval < 1: interval = 1
+    
     frames = []
     count = 0
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
-        if count % frame_interval == 0:
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        if count % interval == 0:
+            # ย่อขนาดทันทีเพื่อเซฟ RAM
+            frame_resized = cv2.resize(frame, (224, 224))
+            rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
             frames.append(rgb_frame)
         count += 1
     cap.release()
     return frames
 
-def analyze_audio_and_lipsync(video_path, frames):
+def analyze_audio_and_lipsync(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
-    audio_risk = 0.0
-    lip_sync_risk = 0.0
+    audio_risk, lip_sync_risk = 0.0, 0.0
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -58,64 +76,47 @@ def analyze_audio_and_lipsync(video_path, frames):
             audio_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
             return 0.0, 0.0
             
         sample_rate, data = wavfile.read(audio_path)
         if len(data) == 0:
-            os.unlink(audio_path)
             return 0.0, 0.0
             
         data_float = data.astype(np.float32)
         fft_data = np.abs(np.fft.rfft(data_float))
         fft_sum = np.sum(fft_data)
         
+        # ค้นหาลักษณะเสียงสังเคราะห์ (Spectral Flatness)
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.03  # ลดโทษเสียง AI ลงเหลือ 3%
-                
-        rms_energy = np.sqrt(np.mean(data_float**2))
-        if rms_energy > 500 and len(frames) > 2:
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-            prev_mouth = None
-            motion_scores = []
-            for frame in frames:
-                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
-                if len(faces) > 0:
-                    x, y, w, h = faces[0]
-                    mouth_roi = cv2.resize(gray[y + int(h/2):y+h, x:x+w], (64, 32))
-                    if prev_mouth is not None:
-                        diff = cv2.absdiff(mouth_roi, prev_mouth)
-                        motion_scores.append(np.mean(diff))
-                    prev_mouth = mouth_roi
-            if len(motion_scores) > 0:
-                avg_mouth_motion = np.mean(motion_scores)
-                if avg_mouth_motion < 2.0 and rms_energy > 1000:
-                    lip_sync_risk = 0.05 # ลดโทษปากแข็งเหลือ 5%
-                elif avg_mouth_motion < 4.0:
-                    lip_sync_risk = 0.02
-                    
-        os.unlink(audio_path)
-        return audio_risk, lip_sync_risk
+                audio_risk = 5.0 # แปลงเป็น 5% โดยตรง
+        
     except Exception:
+        pass
+    finally:
         if os.path.exists(audio_path):
             os.unlink(audio_path)
-        return 0.0, 0.0
+            
+    return audio_risk, lip_sync_risk
 
-uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi)", type=["mp4", "mov", "avi"], accept_multiple_files=True)
+# ==========================================
+# 3. UI และ ระบบประมวลผลหลัก
+# ==========================================
+uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - แนะนำอัปโหลดครั้งละไม่เกิน 10 คลิป", type=["mp4", "mov", "avi"], accept_multiple_files=True)
 
 if uploaded_files:
     st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ผลการวิเคราะห์:")
+        st.subheader("📊 ผลการวิเคราะห์แยกคลิป:")
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 0.75 # ตั้งเกณฑ์ผ่านที่ 75%
+        THRESHOLD = 75.0 # เกณฑ์ตัดตก (เกิน 75% = ไม่ผ่าน)
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -128,14 +129,16 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    percent_score = 0.0
+                    final_score = 0.0
                     status = "ERROR"
+                    details = ""
                     
                     try:
-                        with st.spinner("กำลังสแกน..."):
-                            frames = extract_frames(video_path)
+                        with st.spinner("กำลังวิเคราะห์..."):
+                            frames = extract_frames(video_path, target_fps=3)
+                            
                             if not frames:
-                                st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
+                                st.caption("⚠️ ไม่สามารถอ่านภาพจากวิดีโอได้")
                             else:
                                 frame_scores = []
                                 with torch.no_grad():
@@ -146,56 +149,88 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
-                                mean_val = float(np.mean(frame_scores))
-                                max_val = float(np.max(frame_scores))
-                                std_val = float(np.std(frame_scores))
+                                # --- 💡 การวิเคราะห์ความต่อเนื่อง (Temporal Logic) ---
+                                mean_prob = float(np.mean(frame_scores)) * 100
                                 
-                                audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
+                                # นับเฟรมที่คะแนนพุ่ง (มีความเสี่ยงว่าพัง/บิดเบี้ยว)
+                                suspect_frames = [1 if score > 0.65 else 0 for score in frame_scores]
                                 
-                                # ฐานคะแนนกดให้ต่ำลง (คลิป AI เนียนๆ จะได้คะแนนแถว 30-40%)
-                                base_score = (mean_val * 0.30) + (max_val * 0.15)
+                                # หาช่วงเวลาที่พัง "ต่อเนื่อง" ยาวที่สุด
+                                max_consecutive = 0
+                                current_consecutive = 0
+                                for is_suspect in suspect_frames:
+                                    if is_suspect:
+                                        current_consecutive += 1
+                                        max_consecutive = max(max_consecutive, current_consecutive)
+                                    else:
+                                        current_consecutive = 0
+                                        
+                                # คิดคะแนนพื้นฐานจากค่าเฉลี่ย
+                                base_score = mean_prob
                                 
-                                # ตัวแปรชี้วัดความพัง: คลิปปกติค่า std_val จะต่ำ แต่ถ้ามีภาพกะพริบหรือมือหาย std_val จะสูงมาก
-                                glitch_penalty = std_val * 1.8 
+                                # เงื่อนไขให้อภัย vs งัดให้ตก
+                                if max_consecutive >= 3:
+                                    # พังต่อเนื่อง 3 เฟรมขึ้นไป (ประมาณ 1 วิ) = มือละลาย/ของหายชัดเจน -> งัดคะแนนให้ตก
+                                    glitch_penalty = 35.0
+                                    details = "พบภาพบิดเบี้ยว/ผิดปกติต่อเนื่อง"
+                                elif max_consecutive > 0:
+                                    # พังแค่ 1-2 เฟรม (เสี้ยววิ) = กล้องสั่น/เบลอ -> อนุโลม หักนิดเดียว
+                                    glitch_penalty = 5.0
+                                    details = "พบจุดแปลกเล็กน้อย (อนุโลมให้)"
+                                else:
+                                    glitch_penalty = 0.0
+                                    details = "ภาพรวมแนบเนียน"
+                                    
+                                audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path)
                                 
-                                calibrated_score = base_score + glitch_penalty + audio_risk + lip_sync_risk
-                                percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
+                                # รวมคะแนน
+                                final_score = np.clip(base_score + glitch_penalty + audio_risk, 0.0, 100.0)
                                 
-                                if (percent_score / 100.0) >= THRESHOLD:
+                                if final_score >= THRESHOLD:
                                     status = "REJECT"
-                                    st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
+                                    st.error(f"❌ **REJECT** ({final_score:.0f}%)", icon="🚨")
+                                    st.write(f"*{details}*")
                                 else:
                                     status = "PASS"
-                                    st.success(f"✅ **PASS** ({percent_score:.0f}%)", icon="🟢")
-                                    
-                                st.progress(min(int(percent_score), 100))
+                                    # ถ้าคะแนนคาบเส้น (60-74%) จะขึ้นเตือนสีส้มแบบผ่านหวุดหวิด
+                                    if final_score >= 60.0:
+                                        st.warning(f"✅ **PASS** ({final_score:.0f}%)", icon="⚠️")
+                                        st.write(f"*{details} (ผ่านหวุดหวิด)*")
+                                    else:
+                                        st.success(f"✅ **PASS** ({final_score:.0f}%)", icon="🟢")
+                                        st.write(f"*{details}*")
+                                        
+                                st.progress(min(int(final_score), 100))
+                                
                     except Exception as e:
-                        st.caption("⚠️ เกิดข้อผิดพลาด")
+                        st.caption(f"⚠️ Error: {str(e)}")
                     finally:
                         if os.path.exists(video_path):
                             os.unlink(video_path)
+                        # ระบบคืนพื้นที่ RAM แบบถอนรากถอนโคน
+                        if 'frames' in locals(): del frames
+                        if 'frame_scores' in locals(): del frame_scores
+                        gc.collect()
+                        if torch.cuda.is_available(): torch.cuda.empty_cache()
                     
                     results_summary.append({
                         "ลำดับ": idx + 1,
                         "ชื่อไฟล์": uploaded_file.name,
-                        "คะแนนความเสี่ยง (%)": f"{percent_score:.2f}%",
-                        "สถานะ": status
+                        "ความเสี่ยง": f"{final_score:.1f}%",
+                        "สถานะ": status,
+                        "หมายเหตุ": details
                     })
         
+        # ==========================================
+        # 4. สรุปผลลัพธ์ภาพรวม (Dashboard)
+        # ==========================================
         st.divider()
+        st.subheader("📋 สรุปผลรวมทั้งหมด")
         df_all = pd.DataFrame(results_summary)
-        df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
         
         m1, m2, m3 = st.columns(3)
         total_clips = len(df_all)
-        rejected_count = len(df_rejected)
+        rejected_df = df_all[df_all["สถานะ"] == "REJECT"]
+        rejected_count = len(rejected_df)
         pass_count = total_clips - rejected_count
         reject_rate = (rejected_count / total_clips * 100) if total_clips > 0 else 0
-        
-        m1.metric("จำนวนคลิปทั้งหมด", f"{total_clips} คลิป")
-        m2.metric("จำนวนคลิปที่ผ่าน (PASS)", f"{pass_count} คลิป")
-        m3.metric("จำนวนคลิปที่ถูกคัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}%")
-        
-        if not df_rejected.empty:
-            st.error(f"⚠️ คลิปที่ไม่ผ่านเกณฑ์:")
-            st.dataframe(df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง (%)"]], use_container_width=True, hide_index=True)
