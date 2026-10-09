@@ -2,7 +2,6 @@ streamlit
 torch
 torchvision
 opencv-python-headless
-mediapipe
 timm
 Pillow
 numpy
