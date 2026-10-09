@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("สแกนวิเคราะห์โครงสร้างภาพ ความเสี่ยงเสียงพากย์ และจุดผิดปกติอย่างสมดุล")
+st.write("สแกนภาพรวม เสียงพากย์ และจังหวะการขยับปาก (Lip-Sync) อย่างสมดุล ไม่เข้มงวดเกินไป")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -60,9 +60,12 @@ def extract_frames(video_path, frame_interval=15):
     cap.release()
     return frames
 
-def analyze_audio_artifacts(video_path):
-    """วิเคราะห์ความผิดปกติของคลื่นเสียงพากย์"""
+def analyze_audio_and_lipsync(video_path, frames):
+    """วิเคราะห์ความผิดปกติของเสียง (Audio Artifacts) และจังหวะปาก (Lip-Sync)"""
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+    audio_risk = 0.0
+    lip_sync_risk = 0.0
+    
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -73,35 +76,63 @@ def analyze_audio_artifacts(video_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
-            return 0.0
+            return 0.0, 0.0
             
         sample_rate, data = wavfile.read(audio_path)
         if len(data) == 0:
             os.unlink(audio_path)
-            return 0.0
+            return 0.0, 0.0
             
+        # 1. ตรวจจับเสียงพากย์ AI สังเคราะห์ (Audio Spectral Flatness)
         data_float = data.astype(np.float32)
         fft_data = np.abs(np.fft.rfft(data_float))
         
         fft_sum = np.sum(fft_data)
-        if fft_sum == 0:
-            os.unlink(audio_path)
-            return 0.0
-            
-        normalized_fft = fft_data / fft_sum
-        spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
+        if fft_sum > 0:
+            normalized_fft = fft_data / fft_sum
+            spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
+            if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
+                audio_risk = 0.05 # บวกคะแนนความเสี่ยงเสียง AI แค่ 5% (เบาๆ)
+                
+        # 2. ตรวจจับการขยับปากและใบหน้า (Lip-Sync Check)
+        rms_energy = np.sqrt(np.mean(data_float**2))
         
-        audio_risk = 0.0
-        if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-            audio_risk = 0.05
+        # ถ้ามีเสียงคนพูด (RMS สูง) และดึงเฟรมมาได้
+        if rms_energy > 500 and len(frames) > 2:
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            prev_mouth = None
+            motion_scores = []
             
+            for frame in frames:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
+                
+                if len(faces) > 0:
+                    x, y, w, h = faces[0]
+                    # ครอปเฉพาะใบหน้าส่วนล่าง (บริเวณปาก)
+                    mouth_roi = cv2.resize(gray[y + int(h/2):y+h, x:x+w], (64, 32))
+                    
+                    if prev_mouth is not None:
+                        # คำนวณความต่างของพิกเซลปากว่ามีการขยับหรือไม่
+                        diff = cv2.absdiff(mouth_roi, prev_mouth)
+                        motion_scores.append(np.mean(diff))
+                    prev_mouth = mouth_roi
+            
+            if len(motion_scores) > 0:
+                avg_mouth_motion = np.mean(motion_scores)
+                # ถ้าเสียงดังมาก แต่ปากแทบไม่ขยับ (อาการวิดีโอ AI ที่ปากแข็ง)
+                if avg_mouth_motion < 2.0 and rms_energy > 1000:
+                    lip_sync_risk = 0.08 # บวกความเสี่ยง 8%
+                elif avg_mouth_motion < 4.0:
+                    lip_sync_risk = 0.04 # บวกความเสี่ยง 4%
+                    
         os.unlink(audio_path)
-        return audio_risk
+        return audio_risk, lip_sync_risk
         
     except Exception:
         if os.path.exists(audio_path):
             os.unlink(audio_path)
-        return 0.0
+        return 0.0, 0.0
 
 # --- 4. WEB UI INTERFACE ---
 uploaded_files = st.file_uploader(
@@ -120,7 +151,7 @@ if uploaded_files:
         results_summary = []
         cols = st.columns(3)
         
-        THRESHOLD = 0.75 # เกณฑ์กลางๆ ไม่เข้มงวดเกินไป
+        THRESHOLD = 0.75 # ตั้งเกณฑ์มาตรฐาน 75% ป้องกันการบล็อกคลิปเนียน
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -133,7 +164,7 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    with st.spinner("กำลังวิเคราะห์ความเสี่ยง..."):
+                    with st.spinner("กำลังสแกนภาพ, เสียง, และจังหวะปาก..."):
                         frames = extract_frames(video_path)
                         
                         if not frames:
@@ -151,19 +182,20 @@ if uploaded_files:
                                     fake_prob = probs[0][1].item()
                                     frame_scores.append(fake_prob)
                             
-                            # คำนวณสถิติเพื่อสร้างความแตกต่างตามธรรมชาติของไฟล์
+                            # คำนวณสถิติภาพให้กระจายตัวเป็นธรรมชาติ
                             mean_val = float(np.mean(frame_scores))
                             std_val = float(np.std(frame_scores))
                             min_val = float(np.min(frame_scores))
                             max_val = float(np.max(frame_scores))
                             
-                            audio_risk = analyze_audio_artifacts(video_path)
+                            # วิเคราะห์เสียงพากย์และจังหวะปาก
+                            audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                             
-                            # Dynamic Natural Calibration (กระจายตัวตามความผันผวนของเฟรมวิดีโอ)
+                            # รวมคะแนนอย่างสมดุล (ภาพ + เสียง + ขยับปาก)
                             dynamic_base = (min_val * 0.3) + (mean_val * 0.4) + (max_val * 0.2) + (std_val * 0.1)
-                            calibrated_score = (np.power(dynamic_base, 2.2) * 0.78) + audio_risk
+                            calibrated_score = (np.power(dynamic_base, 2.2) * 0.78) + audio_risk + lip_sync_risk
                             
-                            percent_score = float(np.clip(calibrated_score * 100, 3.0, 95.0))
+                            percent_score = float(np.clip(calibrated_score * 100, 3.0, 96.0))
                             
                             if (percent_score / 100.0) >= THRESHOLD:
                                 status = "REJECT"
@@ -179,7 +211,7 @@ if uploaded_files:
                     results_summary.append({
                         "ลำดับ": idx + 1,
                         "ชื่อไฟล์": uploaded_file.name,
-                        "คะแนนความแปลก AI (%)": f"{percent_score:.2f}%",
+                        "คะแนนความเสี่ยง (%)": f"{percent_score:.2f}%",
                         "สถานะ": status
                     })
         
@@ -205,7 +237,7 @@ if uploaded_files:
         if not df_rejected.empty:
             st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป ดังรายการด้านล่าง:")
             st.dataframe(
-                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความแปลก AI (%)"]], 
+                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง (%)"]], 
                 use_container_width=True,
                 hide_index=True
             )
