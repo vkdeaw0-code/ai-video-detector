@@ -89,7 +89,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.08 # ความเสี่ยงเสียงพากย์ AI
+                audio_risk = 0.08 
                 
         rms_energy = np.sqrt(np.mean(data_float**2))
         
@@ -114,7 +114,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             if len(motion_scores) > 0:
                 avg_mouth_motion = np.mean(motion_scores)
                 if avg_mouth_motion < 2.0 and rms_energy > 1000:
-                    lip_sync_risk = 0.10 # ความเสี่ยงปากแข็งแต่มีเสียงพูดดัง
+                    lip_sync_risk = 0.10 
                 elif avg_mouth_motion < 4.0:
                     lip_sync_risk = 0.05
                     
@@ -151,7 +151,6 @@ if uploaded_files:
             with col:
                 with st.container(border=True):
                     
-                    # แก้ไขบั๊ก Syntax Error ตรงนี้
                     if len(uploaded_file.name) > 20:
                         display_name = f"{uploaded_file.name[:20]}..."
                     else:
@@ -163,33 +162,85 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    with st.spinner("กำลังสแกนภาพ, เสียง, และจังหวะปาก..."):
-                        frames = extract_frames(video_path)
-                        
-                        if not frames:
-                            st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
-                            status = "ERROR"
-                            percent_score = 0
-                        else:
-                            frame_scores = []
-                            with torch.no_grad():
-                                for frame_np in frames:
-                                    pil_img = Image.fromarray(frame_np)
-                                    input_tensor = transform(pil_img).unsqueeze(0).to(device)
-                                    output = model(input_tensor)
-                                    probs = torch.softmax(output, dim=1)
-                                    fake_prob = probs[0][1].item()
-                                    frame_scores.append(fake_prob)
+                    # 💡 ประกาศตัวแปรดักไว้ล่วงหน้า ป้องกัน NameError 100%
+                    percent_score = 0.0
+                    status = "ERROR"
+                    
+                    try:
+                        with st.spinner("กำลังสแกนภาพ, เสียง, และจังหวะปาก..."):
+                            frames = extract_frames(video_path)
                             
-                            mean_val = float(np.mean(frame_scores))
-                            std_val = float(np.std(frame_scores))
-                            min_val = float(np.min(frame_scores))
-                            max_val = float(np.max(frame_scores))
-                            
-                            audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
-                            
-                            # คำนวณความเสี่ยงภาพให้เปอร์เซ็นต์กระจายสวยงาม
-                            dynamic_base = (min_val * 0.2) + (mean_val * 0.4) + (max_val * 0.3) + (std_val * 0.1)
-                            calibrated_score = (np.power(dynamic_base, 1.8) * 0.85) + audio_risk + lip_sync_risk
-                            
-                            percent_score
+                            if not frames:
+                                st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
+                            else:
+                                frame_scores = []
+                                with torch.no_grad():
+                                    for frame_np in frames:
+                                        pil_img = Image.fromarray(frame_np)
+                                        input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                                        output = model(input_tensor)
+                                        probs = torch.softmax(output, dim=1)
+                                        fake_prob = probs[0][1].item()
+                                        frame_scores.append(fake_prob)
+                                
+                                mean_val = float(np.mean(frame_scores))
+                                std_val = float(np.std(frame_scores))
+                                min_val = float(np.min(frame_scores))
+                                max_val = float(np.max(frame_scores))
+                                
+                                audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
+                                
+                                dynamic_base = (min_val * 0.2) + (mean_val * 0.4) + (max_val * 0.3) + (std_val * 0.1)
+                                calibrated_score = (np.power(dynamic_base, 1.8) * 0.85) + audio_risk + lip_sync_risk
+                                
+                                percent_score = float(np.clip(calibrated_score * 100, 3.0, 96.0))
+                                
+                                if (percent_score / 100.0) >= THRESHOLD:
+                                    status = "REJECT"
+                                    st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
+                                else:
+                                    status = "PASS"
+                                    st.success(f"✅ **PASS** ({percent_score:.0f}%)", icon="🟢")
+                                    
+                                st.progress(min(int(percent_score), 100))
+                    except Exception as e:
+                        st.caption("⚠️ เกิดข้อผิดพลาดระหว่างสแกนคลิปนี้")
+                    finally:
+                        if os.path.exists(video_path):
+                            os.unlink(video_path)
+                    
+                    results_summary.append({
+                        "ลำดับ": idx + 1,
+                        "ชื่อไฟล์": uploaded_file.name,
+                        "คะแนนความเสี่ยง (%)": f"{percent_score:.2f}%",
+                        "สถานะ": status
+                    })
+        
+        # --- 5. REJECTED CLIPS DASHBOARD ---
+        st.divider()
+        st.header("🚫 แดชบอร์ดสรุปคลิปที่ไม่ผ่านการคัดกรอง")
+        
+        df_all = pd.DataFrame(results_summary)
+        df_rejected = df_all[df_all["สถานะ"] == "REJECT"]
+        
+        m1, m2, m3 = st.columns(3)
+        total_clips = len(df_all)
+        rejected_count = len(df_rejected)
+        pass_count = total_clips - rejected_count
+        reject_rate = (rejected_count / total_clips * 100) if total_clips > 0 else 0
+        
+        m1.metric("จำนวนคลิปทั้งหมด", f"{total_clips} คลิป")
+        m2.metric("จำนวนคลิปที่ผ่าน (PASS)", f"{pass_count} คลิป")
+        m3.metric("จำนวนคลิปที่ถูกคัดออก (REJECT)", f"{rejected_count} คลิป", delta=f"{reject_rate:.1f}%", delta_color="inverse")
+        
+        st.write("")
+        
+        if not df_rejected.empty:
+            st.error(f"⚠️ ตรวจพบคลิปที่ไม่ผ่านเกณฑ์ทั้งหมด {len(df_rejected)} คลิป:")
+            st.dataframe(
+                df_rejected[["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง (%)"]], 
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.success("🎉 ทุกคลิปผ่านการคัดกรองทั้งหมด")
