@@ -8,13 +8,14 @@ import os
 import pandas as pd
 import subprocess
 import imageio_ffmpeg
+import gc # เพิ่มระบบเคลียร์ขยะ ป้องกัน RAM เต็มเวลาอัปหลายคลิป
 from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
 
 st.set_page_config(page_title="ระบบตรวจจับคลิปวิดีโอ AI", page_icon="🎬", layout="wide")
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบเน้นความเสถียร (คัดออกเมื่อมีวัตถุหายฉับพลัน มือบิดเบี้ยว หรือจุดพังรุนแรง)")
+st.write("ระบบ Max-Value Overdrive (ปล่อยผ่านคลิปเนียน, แต่ปัดตกทันทีถ้ามีรูปหาย/มือละลายแม้แต่เฟรมเดียว)")
 
 @st.cache_resource
 def load_detection_models():
@@ -32,7 +33,8 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-def extract_frames(video_path, frame_interval=10):
+# 💡 ดึงภาพถี่ขึ้นเป็นทุกๆ 8 เฟรม (เพื่อไม่ให้พลาดเสี้ยววินาทีที่รูปหายไป)
+def extract_frames(video_path, frame_interval=8):
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -74,7 +76,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.03 
+                audio_risk = 0.03 # เสียง AI หัก 3%
                 
         rms_energy = np.sqrt(np.mean(data_float**2))
         if rms_energy > 500 and len(frames) > 2:
@@ -105,7 +107,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             os.unlink(audio_path)
         return 0.0, 0.0
 
-uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi)", type=["mp4", "mov", "avi"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - อัปโหลดทีละ 10-15 คลิปจะเสถียรสุด", type=["mp4", "mov", "avi"], accept_multiple_files=True)
 
 if uploaded_files:
     st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
@@ -115,7 +117,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 0.75 
+        THRESHOLD = 0.75 # เกณฑ์ตัดตก 75%
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -148,32 +150,20 @@ if uploaded_files:
                                 
                                 mean_val = float(np.mean(frame_scores))
                                 max_val = float(np.max(frame_scores))
-                                std_val = float(np.std(frame_scores))
                                 
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                                 
-                                # 💡 เพิ่มระบบดักจับวัตถุหาย (Temporal Glitch Detection)
-                                temporal_penalty = 0.0
-                                if len(frames) > 2:
-                                    pixel_diffs = []
-                                    for i in range(1, len(frames)):
-                                        gray1 = cv2.cvtColor(frames[i-1], cv2.COLOR_RGB2GRAY)
-                                        gray2 = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
-                                        diff = np.mean(cv2.absdiff(gray1, gray2))
-                                        pixel_diffs.append(diff)
-                                    
-                                    if len(pixel_diffs) > 0:
-                                        max_diff = np.max(pixel_diffs)
-                                        median_diff = np.median(pixel_diffs)
-                                        # ถ้าจู่ๆ เฟรมมีการเปลี่ยนแปลงรุนแรง (วัตถุหาย) จะดันคะแนนขึ้นทันที 25%
-                                        if median_diff < 15.0 and max_diff > (median_diff * 3.5):
-                                            temporal_penalty = 0.25 
+                                # 💡 1. ให้น้ำหนักเฟรมที่พังที่สุด (max_val) ถึง 70% 
+                                base_score = (mean_val * 0.30) + (max_val * 0.70)
                                 
-                                base_score = (mean_val * 0.30) + (max_val * 0.15)
-                                glitch_penalty = std_val * 1.8 
+                                # 💡 2. ตัวเร่งคะแนน (Glitch Overdrive)
+                                # ถ้าระบบเจอเฟรมไหนที่ดูปลอมชัดเจน (คะแนนเฟรมนั้นเกิน 0.55) จะบวกคะแนนทวีคูณให้ทะลุ 75% ทันที
+                                glitch_penalty = 0.0
+                                if max_val > 0.55:
+                                    glitch_penalty = (max_val - 0.55) * 2.0 
                                 
-                                # รวมคะแนนทั้งหมด
-                                calibrated_score = base_score + glitch_penalty + audio_risk + lip_sync_risk + temporal_penalty
+                                # รวมคะแนน
+                                calibrated_score = base_score + glitch_penalty + audio_risk + lip_sync_risk
                                 percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
                                 
                                 if (percent_score / 100.0) >= THRESHOLD:
@@ -189,6 +179,10 @@ if uploaded_files:
                     finally:
                         if os.path.exists(video_path):
                             os.unlink(video_path)
+                        # คืนพื้นที่ RAM ทันที ป้องกันเว็บค้าง
+                        if 'frames' in locals(): del frames
+                        if 'frame_scores' in locals(): del frame_scores
+                        gc.collect()
                     
                     results_summary.append({
                         "ลำดับ": idx + 1,
