@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบสแกนโหมดเดียวแบบสมดุล (ตรวจภาพ, เสียงพากย์, และจังหวะขยับปาก)")
+st.write("ระบบสแกนโหมดเดียวแบบสมดุล (ปรับเกณฑ์ให้คลิปรีวิวสินค้า AI คุณภาพสูงสามารถผ่านได้)")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -88,8 +88,9 @@ def analyze_audio_and_lipsync(video_path, frames):
         if fft_sum > 0:
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
+            # ลดความเสี่ยงของเสียงพากย์ AI ลงเหลือแค่ 4% (ยอมรับการใช้ TTS ในคลิปรีวิวมากขึ้น)
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.08 
+                audio_risk = 0.04 
                 
         rms_energy = np.sqrt(np.mean(data_float**2))
         
@@ -143,7 +144,8 @@ if uploaded_files:
         results_summary = []
         cols = st.columns(3)
         
-        THRESHOLD = 0.70 # เกณฑ์มาตรฐานที่ 70%
+        # ปรับเกณฑ์ (Threshold) ขยับขึ้นเป็น 75% เพื่อให้คลิปที่มีจุดเพี้ยนเล็กน้อยสามารถผ่านได้
+        THRESHOLD = 0.75 
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -162,7 +164,6 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    # 💡 ประกาศตัวแปรดักไว้ล่วงหน้า ป้องกัน NameError 100%
                     percent_score = 0.0
                     status = "ERROR"
                     
@@ -190,8 +191,9 @@ if uploaded_files:
                                 
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                                 
+                                # ปรับสูตรให้บีบคะแนนภาพรวมลงมานิดหน่อย คลิปแบบนี้จะตกอยู่ที่ประมาณ 60-65%
                                 dynamic_base = (min_val * 0.2) + (mean_val * 0.4) + (max_val * 0.3) + (std_val * 0.1)
-                                calibrated_score = (np.power(dynamic_base, 1.8) * 0.85) + audio_risk + lip_sync_risk
+                                calibrated_score = (np.power(dynamic_base, 1.9) * 0.80) + audio_risk + lip_sync_risk
                                 
                                 percent_score = float(np.clip(calibrated_score * 100, 3.0, 96.0))
                                 
