@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("ระบบสแกนดักจับจุดผิดปกติ (เน้นดักจับมือบิดเบี้ยวและภาพลอยเคลื่อนไหว)")
+st.write("ระบบสแกนดักจับจุดบกพร่อง (เน้นคัดออกเฉพาะคลิปที่มือหาย/ภาพละลายฉับพลัน)")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -82,7 +82,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.04 
+                audio_risk = 0.04  # เสียง AI โดนหักนิดเดียว
                 
         rms_energy = np.sqrt(np.mean(data_float**2))
         
@@ -103,9 +103,9 @@ def analyze_audio_and_lipsync(video_path, frames):
             if len(motion_scores) > 0:
                 avg_mouth_motion = np.mean(motion_scores)
                 if avg_mouth_motion < 2.0 and rms_energy > 1000:
-                    lip_sync_risk = 0.10 
+                    lip_sync_risk = 0.08
                 elif avg_mouth_motion < 4.0:
-                    lip_sync_risk = 0.05
+                    lip_sync_risk = 0.04
                     
         os.unlink(audio_path)
         return audio_risk, lip_sync_risk
@@ -129,7 +129,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 0.75 
+        THRESHOLD = 0.65 # เกณฑ์ตัดตกที่ 65%
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -161,21 +161,22 @@ if uploaded_files:
                                         frame_scores.append(probs[0][1].item())
                                 
                                 mean_val = float(np.mean(frame_scores))
-                                std_val = float(np.std(frame_scores))
                                 max_val = float(np.max(frame_scores))
                                 
                                 audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
                                 
-                                # 💡 ปรับสมการใหม่: ดัน Max Value (เฟรมที่พังสุด) เป็น 60%
-                                dynamic_base = (mean_val * 0.2) + (max_val * 0.6) + (std_val * 0.2)
+                                # 💡 1. ฐานคะแนนผ่อนปรนสุดๆ (ปล่อยผ่านคลิป AI ที่เนียนเสมอต้นเสมอปลาย)
+                                base_score = np.power(mean_val, 2.0) * 0.45
                                 
-                                # 💡 จับการกะพริบ/ลอย: ถ้าภาพบิดไปมา (std_val สูง) ให้บวกคะแนนเพิ่มทันที
-                                motion_penalty = 0.10 if std_val > 0.15 else 0.0
+                                # 💡 2. ระบบดักจับจุดพังฉับพลัน (Glitch Spike Detection)
+                                # จับเฉพาะอาการ "จู่ๆ มือหาย, นิ้วละลาย" ซึ่งจะทำให้คะแนน max โดดหนีค่าเฉลี่ย
+                                glitch_risk = 0.0
+                                if max_val > 0.80 and (max_val - mean_val) > 0.12:
+                                    glitch_risk = (max_val - mean_val) * 2.5 # คูณเบิ้ลลงโทษเฉพาะจุดที่เพี้ยนหนัก
                                 
-                                # 💡 ลดการกดคะแนน (power = 1.1) ทำให้คะแนนดิบสะท้อนออกมาตามจริงมากขึ้น
-                                calibrated_score = (np.power(dynamic_base, 1.1) * 0.95) + audio_risk + lip_sync_risk + motion_penalty
+                                calibrated_score = base_score + glitch_risk + audio_risk + lip_sync_risk
                                 
-                                percent_score = float(np.clip(calibrated_score * 100, 3.0, 96.0))
+                                percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
                                 
                                 if (percent_score / 100.0) >= THRESHOLD:
                                     status = "REJECT"
