@@ -16,8 +16,16 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI (ตรวจจับมือและเงาสะท้อนเพี้ยน)")
-st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ เพื่อสแกนหาความผิดปกติและคัดออกอัตโนมัติ")
+st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
+st.write("อัปโหลดคลิปวิดีโอ 10 วินาที ได้พร้อมกันหลายไฟล์ ระบบตรวจจับแบบปรับสมดุลเพื่อการใช้งานจริง")
+
+# --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
+st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
+sensitivity_mode = st.sidebar.radio(
+    "เลือกโหมดการตรวจจับ:",
+    ["🟢 โหมดผ่อนผัน (แนะนำ - คลิปทั่วไป/รีวิวผ่านได้)", "🚨 โหมดเข้มงวด (จับผิดเงามือ/นิ้วเพี้ยน)"],
+    index=0
+)
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -36,37 +44,7 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# --- 3. HAND & REFLECTION ANOMALY DETECTION (ใช้ OpenCV Contour Analysis) ---
-def analyze_hand_reflection_anomalies(rgb_frame):
-    """วิเคราะห์ความผิดปกติของขอบมือ เงาสะท้อนในกระจก และร่องรอยนิ้วเพี้ยนด้วย OpenCV"""
-    gray = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
-    
-    # 1. ใช้ Adaptive Threshold สกัดขอบวัตถุและมือ
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # 2. ค้นหา Contour (เส้นขอบวงกลม/รูปทรงมือและวัตถุ)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
-    anomaly_penalty = 0.0
-    
-    # 3. ตรวจเช็กความบิดเบี้ยวของ Convexity Defects (ร่องนิ้วมือ/เงาขาดหาย)
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if 1000 < area < 50000: # กรองเฉพาะขนาดของมือหรือเงาสะท้อน
-            hull = cv2.convexHull(cnt, returnPoints=False)
-            if len(hull) > 3:
-                try:
-                    defects = cv2.convexityDefects(cnt, hull)
-                    if defects is not None:
-                        # ถ้าร่องนิ้วห่าง/บิดเบี้ยวผิดสัดส่วน (ลักษณะพิกเซลแตกของ AI)
-                        if len(defects) > 10: 
-                            anomaly_penalty += 0.15
-                except:
-                    pass
-                    
-    return min(anomaly_penalty, 0.5)
-
+# --- 3. HELPER FUNCTIONS ---
 def extract_frames(video_path, frame_interval=20):
     cap = cv2.VideoCapture(video_path)
     frames = []
@@ -98,7 +76,7 @@ if uploaded_files:
     
     if st.button("🔍 เริ่มกระบวนการสแกนตรวจจับทุกคลิป", type="primary"):
         st.divider()
-        st.subheader("📊 ผลการวิเคราะห์แบบเข้มงวดเรื่องมือและเงาสะท้อน:")
+        st.subheader("📊 ผลการวิเคราะห์:")
         
         results_summary = []
         cols = st.columns(3)
@@ -114,7 +92,7 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    with st.spinner("กำลังสแกนมือและเงาสะท้อน..."):
+                    with st.spinner("กำลังสแกน..."):
                         frames = extract_frames(video_path)
                         
                         if not frames:
@@ -123,31 +101,29 @@ if uploaded_files:
                             percent_score = 0
                         else:
                             scores = []
-                            hand_penalties = []
-                            
                             with torch.no_grad():
                                 for frame_np in frames:
-                                    # 1. วิเคราะห์โครงสร้างภาพด้วย EfficientNet
                                     pil_img = Image.fromarray(frame_np)
                                     input_tensor = transform(pil_img).unsqueeze(0).to(device)
                                     output = model(input_tensor)
                                     probs = torch.softmax(output, dim=1)
                                     scores.append(probs[0][1].item())
-                                    
-                                    # 2. สแกนเงาสะท้อนมือและขอบนิ้วด้วย OpenCV Analysis
-                                    penalty = analyze_hand_reflection_anomalies(frame_np)
-                                    hand_penalties.append(penalty)
                             
-                            base_score = float(np.median(scores))
-                            extra_penalty = float(np.mean(hand_penalties))
+                            raw_score = float(np.median(scores))
                             
-                            # รวมคะแนนภาพรวม + คะแนนเงาสะท้อนมือเพี้ยน
-                            total_score = min(1.0, base_score + extra_penalty)
+                            # 🎯 ปรับการคำนวณตามโหมดที่ผู้ใช้เลือกใน Sidebar
+                            if "โหมดผ่อนผัน" in sensitivity_mode:
+                                # ปรับสเกลนุ่มนวล เพื่อให้คลิปที่รีวิวสินค้า/มือแวบผ่านได้สบายๆ
+                                calibrated_score = np.clip((raw_score - 0.5) * 0.5 + 0.25, 0.0, 1.0)
+                                THRESHOLD = 0.85
+                            else:
+                                # โหมดเข้มงวด คัดออกง่ายขึ้นสำหรับเคสกระจก/เงาเพี้ยน
+                                calibrated_score = raw_score
+                                THRESHOLD = 0.65
+                                
+                            percent_score = float(calibrated_score * 100)
                             
-                            THRESHOLD = 0.70  # เกณฑ์ตัดสิน
-                            percent_score = float(total_score * 100)
-                            
-                            if total_score >= THRESHOLD:
+                            if calibrated_score >= THRESHOLD:
                                 status = "REJECT"
                                 st.error(f"❌ **REJECT** ({percent_score:.0f}%)", icon="🚨")
                             else:
