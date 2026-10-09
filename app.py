@@ -20,13 +20,13 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("สแกนวิเคราะห์ภาพ เงาสะท้อน และเสียงพากย์สังเคราะห์ ปรับเกณฑ์ผ่อนผันให้เข้มรัดกุมขึ้น")
+st.write("สแกนวิเคราะห์ความเสี่ยงคลิปวิดีโอ 10 วินาที พร้อมปรับสมดุลเกณฑ์ผ่อนผันและเข้มงวด")
 
 # --- SIDEBAR: ปรับระดับความเข้มงวดในการตรวจจับ ---
 st.sidebar.header("⚙️ ตั้งค่าระดับการคัดกรอง")
 sensitivity_mode = st.sidebar.radio(
     "เลือกโหมดการตรวจจับ:",
-    ["🟢 โหมดผ่อนผัน (เกณฑ์ 70% - ยอมรับงานเนียน คัดออกจุดเพี้ยนชัด)", "🚨 โหมดเข้มงวด (เกณฑ์ 55% - ดักจับละเอียดทุกมิติ)"],
+    ["🟢 โหมดผ่อนผัน (เกณฑ์ 80% - ปล่อยผ่านงานรีวิว/โฆษณาที่ดูเนียน)", "🚨 โหมดเข้มงวด (เกณฑ์ 55% - ดักจับจุดเพี้ยนละเอียด)"],
     index=0
 )
 
@@ -49,6 +49,7 @@ transform = transforms.Compose([
 
 # --- 3. HELPER FUNCTIONS ---
 def extract_frames(video_path, frame_interval=15):
+    """สกัดเฟรมภาพออกจากคลิปวิดีโอแบบสุ่มกระจาย"""
     cap = cv2.VideoCapture(video_path)
     frames = []
     count = 0
@@ -68,6 +69,7 @@ def extract_frames(video_path, frame_interval=15):
     return frames
 
 def analyze_audio_artifacts(video_path):
+    """สกัดและวิเคราะห์คลื่นความถี่เสียงพากย์"""
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -99,7 +101,7 @@ def analyze_audio_artifacts(video_path):
         
         audio_risk = 0.0
         if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-            audio_risk = 0.12
+            audio_risk = 0.08 # เพิ่มค่าน้ำหนักเสียงเพียงเล็กน้อยเพื่อไม่ให้ดึงคะแนนพัง
             
         os.unlink(audio_path)
         return audio_risk
@@ -155,25 +157,25 @@ if uploaded_files:
                                     fake_prob = probs[0][1].item()
                                     frame_scores.append(fake_prob)
                             
+                            # ดึงสถิติจริงจากเฟรมภาพอย่างปลอดภัย
+                            median_val = float(np.median(frame_scores))
                             mean_val = float(np.mean(frame_scores))
                             std_val = float(np.std(frame_scores))
-                            min_val = float(np.min(frame_scores))
                             max_val = float(np.max(frame_scores))
                             
-                            # ตรวจจับเสียงสังเคราะห์
                             audio_risk_score = analyze_audio_artifacts(video_path)
                             
+                            # 🎯 คำนวณคะแนนตามโหมดอย่างถูกต้อง
                             if "โหมดผ่อนผัน" in sensitivity_mode:
-                                # ปรับเพิ่มน้ำหนักให้เข้มข้นขึ้นแต่พอดี
-                                base_val = (median_val := float(np.median(frame_scores)) * 0.5) + (mean_val * 0.3) + (max_val * 0.2)
-                                calibrated_score = (np.power(base_val, 1.8) * 0.82) + audio_risk_score
-                                THRESHOLD = 0.70
+                                base_val = (median_val * 0.5) + (mean_val * 0.3) + (std_val * 0.2)
+                                calibrated_score = (np.power(base_val, 2.8) * 0.70) + audio_risk_score
+                                THRESHOLD = 0.80 # เกณฑ์ 80% ปล่อยผ่านงานเนียน
                             else:
                                 strict_base = (mean_val * 0.4) + (max_val * 0.4) + (std_val * 0.2)
-                                calibrated_score = (np.power(strict_base, 1.1) * 0.92) + (audio_risk_score * 1.5)
-                                THRESHOLD = 0.55
+                                calibrated_score = (np.power(strict_base, 1.2) * 0.90) + audio_risk_score
+                                THRESHOLD = 0.55 # เกณฑ์ 55% สำหรับจับผิดละเอียด
                                 
-                            percent_score = float(np.clip(calibrated_score * 100, 2.0, 98.0))
+                            percent_score = float(np.clip(calibrated_score * 100, 1.0, 98.0))
                             
                             if (percent_score / 100.0) >= THRESHOLD:
                                 status = "REJECT"
