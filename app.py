@@ -2,7 +2,6 @@ import streamlit as st
 import cv2
 import torch
 import timm
-import mediapipe as mp
 import numpy as np
 import tempfile
 import os
@@ -26,9 +25,12 @@ def load_detection_models():
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
-    return model, device
+    
+    # โหลดตัวตรวจจับใบหน้ามาตรฐานของ OpenCV (Haar Cascade)
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    return model, face_cascade, device
 
-model, device = load_detection_models()
+model, face_cascade, device = load_detection_models()
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -42,36 +44,25 @@ def extract_and_crop_faces(video_path, frame_interval=10):
     cropped_faces = []
     count = 0
     
-    # โหลด FaceDetection ผ่าน mp.solutions โดยตรงภายในฟังก์ชัน
-    mp_face_detection = mp.solutions.face_detection
-    
-    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detector:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            if count % frame_interval == 0:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_detector.process(rgb_frame)
-                
-                if results.detections:
-                    h, w, _ = frame.shape
-                    for detection in results.detections:
-                        bbox = detection.location_data.relative_bounding_box
-                        xmin = max(0, int(bbox.xmin * w))
-                        ymin = max(0, int(bbox.ymin * h))
-                        width = int(bbox.width * w)
-                        height = int(bbox.height * h)
-                        
-                        xmax = min(w, xmin + width)
-                        ymax = min(h, ymin + height)
-                        
-                        face = rgb_frame[ymin:ymax, xmin:xmax]
-                        if face.shape[0] > 10 and face.shape[1] > 10:
-                            cropped_faces.append(face)
-            count += 1
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
             
+        if count % frame_interval == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # สแกนหาใบหน้าด้วย OpenCV
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            
+            for (x, y, w, h) in faces:
+                face = rgb_frame[y:y+h, x:x+w]
+                if face.shape[0] > 10 and face.shape[1] > 10:
+                    cropped_faces.append(face)
+                    
+        count += 1
+        
     cap.release()
     return cropped_faces
 
