@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎬 ระบบตรวจจับและคัดกรองคลิปวิดีโอ AI")
-st.write("สแกนภาพรวม เสียงพากย์ และ Lip-Sync (ปรับเกณฑ์เข้มงวดขึ้นเล็กน้อย)")
+st.write("ระบบสแกนโหมดเดียวแบบสมดุล (ตรวจภาพ, เสียงพากย์, และจังหวะขยับปาก)")
 
 # --- 2. LOAD MODELS ---
 @st.cache_resource
@@ -89,7 +89,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             normalized_fft = fft_data / fft_sum
             spectral_flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
             if spectral_flatness < 1e-6 or spectral_flatness > 1e-3:
-                audio_risk = 0.08 # ปรับเพิ่มความเสี่ยงเสียง AI เป็น 8%
+                audio_risk = 0.08 # ความเสี่ยงเสียงพากย์ AI
                 
         rms_energy = np.sqrt(np.mean(data_float**2))
         
@@ -114,7 +114,7 @@ def analyze_audio_and_lipsync(video_path, frames):
             if len(motion_scores) > 0:
                 avg_mouth_motion = np.mean(motion_scores)
                 if avg_mouth_motion < 2.0 and rms_energy > 1000:
-                    lip_sync_risk = 0.10 # ปรับความเสี่ยงปากไม่ขยับเป็น 10%
+                    lip_sync_risk = 0.10 # ความเสี่ยงปากแข็งแต่มีเสียงพูดดัง
                 elif avg_mouth_motion < 4.0:
                     lip_sync_risk = 0.05
                     
@@ -143,11 +143,53 @@ if uploaded_files:
         results_summary = []
         cols = st.columns(3)
         
-        THRESHOLD = 0.70 # ปรับเกณฑ์ลดลงมาที่ 70% เพื่อให้คัดออกง่ายขึ้นนิดหน่อย
+        THRESHOLD = 0.70 # เกณฑ์มาตรฐานที่ 70%
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
             
             with col:
                 with st.container(border=True):
-                    st.caption(f"🎬 คลิปที่ {idx
+                    
+                    # แก้ไขบั๊ก Syntax Error ตรงนี้
+                    if len(uploaded_file.name) > 20:
+                        display_name = f"{uploaded_file.name[:20]}..."
+                    else:
+                        display_name = uploaded_file.name
+                        
+                    st.caption(f"🎬 คลิปที่ {idx+1}: **{display_name}**")
+                    
+                    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+                    tfile.write(uploaded_file.read())
+                    video_path = tfile.name
+                    
+                    with st.spinner("กำลังสแกนภาพ, เสียง, และจังหวะปาก..."):
+                        frames = extract_frames(video_path)
+                        
+                        if not frames:
+                            st.caption("⚠️ ไม่สามารถอ่านเฟรมได้")
+                            status = "ERROR"
+                            percent_score = 0
+                        else:
+                            frame_scores = []
+                            with torch.no_grad():
+                                for frame_np in frames:
+                                    pil_img = Image.fromarray(frame_np)
+                                    input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                                    output = model(input_tensor)
+                                    probs = torch.softmax(output, dim=1)
+                                    fake_prob = probs[0][1].item()
+                                    frame_scores.append(fake_prob)
+                            
+                            mean_val = float(np.mean(frame_scores))
+                            std_val = float(np.std(frame_scores))
+                            min_val = float(np.min(frame_scores))
+                            max_val = float(np.max(frame_scores))
+                            
+                            audio_risk, lip_sync_risk = analyze_audio_and_lipsync(video_path, frames)
+                            
+                            # คำนวณความเสี่ยงภาพให้เปอร์เซ็นต์กระจายสวยงาม
+                            dynamic_base = (min_val * 0.2) + (mean_val * 0.4) + (max_val * 0.3) + (std_val * 0.1)
+                            calibrated_score = (np.power(dynamic_base, 1.8) * 0.85) + audio_risk + lip_sync_risk
+                            
+                            percent_score
