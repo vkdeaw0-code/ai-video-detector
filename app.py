@@ -22,12 +22,12 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Strict Original + Turbo Batch 70%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Strict + Presenter Mode 70%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
-*   ⚡ **Turbo Batch:** ประมวลผลไวขึ้นด้วยการมัดรวมภาพ (Batch Processing) แต่ใช้ความละเอียด FPS เท่าเดิม
-*   📏 **Dynamic Proportion:** สินค้าทั่วไปใช้เกณฑ์โหด (มือ > 85% ปัดตก) แต่อนุโลมเฉพาะสินค้าไซส์ยักษ์ (เช่น ถุงอาหารสัตว์)
-*   📦 **Dynamic Stability:** สินค้าทั่วไปต้องนิ่ง > 60% (อนุโลมเฉพาะของชิ้นใหญ่มาก > 40%)
+*   ⚡ **Turbo Batch:** ประมวลผลภาพมัดรวม เร็วขึ้น 3-5 เท่า
+*   🛍️ **Presenter Mode:** อนุโลมการใช้สองมือถือสินค้า (เช่น ถุงอาหารสัตว์) ให้ผ่านสเกลได้ง่ายขึ้น
+*   📦 **Dynamic Stability:** อนุโลมรอยยับ การแกว่ง และการสะท้อนแสงของแพ็กเกจจิ้ง
 *   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
 *   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
 """)
@@ -50,7 +50,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. เครื่องยนต์วิเคราะห์สเกลและรูปทรง (ดั้งเดิม เสถียรสุด)
 # ==========================================
-def process_video_advanced(video_path, target_fps=6): # 💡 กลับมาใช้ FPS 6 ตามโค้ดดั้งเดิมที่เข้มงวด
+def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0 or np.isnan(video_fps): video_fps = 30
@@ -209,7 +209,6 @@ if uploaded_files:
                                 continue
                                 
                             frame_scores = []
-                            # เร่งความเร็วด้วย Batch Processing
                             batch_size = 16 
                             with torch.no_grad():
                                 for i in range(0, len(frames), batch_size):
@@ -225,32 +224,32 @@ if uploaded_files:
                             details_list = []
                             
                             # ==========================================
-                            # 💡 กฎที่ 1: สัดส่วนมือต่อสินค้า (Dynamic Proportion)
+                            # 💡 กฎที่ 1: สัดส่วนมือต่อสินค้า (Presenter Mode)
                             # ==========================================
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 500 and o_area > 500:
-                                    # แยกเกณฑ์: ถ้าของชิ้นใหญ่มาก > 15000 พิกเซล ให้อนุโลมมือ 1.8 เท่า
-                                    # แต่ถ้าของชิ้นปกติ (เหมือนในคลิปรีวิวชั้นวาง) บังคับเข้มงวดที่ 0.85 (85%)
-                                    limit_ratio = 1.8 if o_area > 15000 else 0.85
+                                    # 💡 แก้ไข: ถ้าของชิ้นกลาง-ใหญ่ (เกิน 5000 พิกเซล) อนุญาตให้มือใหญ่กว่าได้ถึง 2.5 เท่า (รองรับถือ 2 มือ)
+                                    # ถ้าของชิ้นเล็ก บังคับที่ 1.5 เท่า
+                                    limit_ratio = 2.5 if o_area > 5000 else 1.5
                                     if (s_area / o_area) > limit_ratio: 
                                         miniature_frames += 1
                                         
                             if miniature_frames >= 3:
                                 visual_penalty += 85.0 
-                                details_list.append("⛔ สเกลสินค้าหลอกตา/ของจิ๋ว (มือบังมิดสินค้าผิดปกติ)")
+                                details_list.append("⛔ สเกลสินค้าหลอกตา (สัดส่วนมือใหญ่ผิดปกติ)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Dynamic Stability)
+                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Stability for Bags)
                             # ==========================================
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
-                                is_large_object = median_obj > 15000
+                                is_held_product = median_obj > 5000
                                 
-                                # แยกเกณฑ์ความนิ่ง: ของปกติบังคับ 60% / ของใหญ่มากอนุโลม 40%
-                                pass_percent = 40.0 if is_large_object else 60.0
-                                tolerance = 0.75 if is_large_object else 0.50
+                                # 💡 แก้ไข: อนุโลมของชิ้นใหญ่ (เช่น ถุงอาหาร) ให้ผ่านเกณฑ์ความนิ่งที่ 30% และยืดหยุ่นพื้นที่ถึง 85%
+                                pass_percent = 30.0 if is_held_product else 50.0
+                                tolerance = 0.85 if is_held_product else 0.50
                                 
                                 stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= tolerance)
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
@@ -260,7 +259,7 @@ if uploaded_files:
                                     details_list.append(f"⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (สเกลคงที่ <{int(pass_percent)}%)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt) - ดึงเกณฑ์โหดกลับมา
+                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt)
                             # ==========================================
                             severe_streak = 0
                             max_severe_streak = 0
