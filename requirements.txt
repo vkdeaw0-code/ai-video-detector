@@ -1,10 +1,5 @@
 streamlit
-torch
-torchvision
 timm
-numpy
-pandas
-Pillow
-opencv-python-headless
 imageio-ffmpeg
 scipy
+opencv-python-headless
