@@ -226,7 +226,7 @@ if uploaded_files:
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 500 and o_area > 500:
-                                    if (s_area / o_area) > 0.75: # 💡 แก้จาก 0.45 เป็น 0.75
+                                    if (s_area / o_area) > 0.55: # 💡 แก้จาก 0.45 เป็น 0.75
                                         miniature_frames += 1
                                         
                             if miniature_frames >= 3:
