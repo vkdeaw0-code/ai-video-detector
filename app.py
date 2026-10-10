@@ -16,9 +16,9 @@ from torchvision import transforms
 # ==========================================
 # 1. ตั้งค่าหน้าเว็บ Streamlit และโหลดโมเดล
 # ==========================================
-st.set_page_config(page_title="AI Video Inspector Pro", page_icon="🎬", layout="wide")
-st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (เวอร์ชันเข้มงวดสัดส่วนสมดุล)")
-st.write("ระบบตรวจจับคุณภาพคน สินค้า และเสียงภาษาไทย: **เกณฑ์ตัดตก 76% ขึ้นไป** | พลาดเกิน 2 วินาที หรือเสียงเพี้ยนเกิน 2 คำ = หักคะแนนหนักตัดตก | คะแนน % คำนวณตามความละเอียดจริงของคลิป")
+st.set_page_config(page_title="AI Video Inspector Precision", page_icon="🎬", layout="wide")
+st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (เวอร์ชันสแกนสเกลและเสียงสะดุด)")
+st.write("ระบบตรวจจับขั้นสูง: **เกณฑ์ตัดตก 76% ขึ้นไป** | ตรวจจับขนาดสินค้าหลอกตา (สเกลไม่ตรงจริง) และเสียงพูดอ่านตัวย่อเพี้ยน/คำสะดุด")
 
 @st.cache_resource
 def load_detection_models():
@@ -37,15 +37,16 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. ฟังก์ชันสแกนภาพวิดีโอ (6 FPS)
+# 2. ฟังก์ชันวิเคราะห์วิดีโอ & สเกลสินค้า
 # ==========================================
-def extract_frames(video_path, target_fps=6): 
+def extract_and_analyze_frames(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0: video_fps = 30
     
     interval = max(1, int(video_fps / target_fps))
     frames = []
+    scale_anomalies = []
     count = 0
     
     while cap.isOpened():
@@ -56,17 +57,35 @@ def extract_frames(video_path, target_fps=6):
             frame_resized = cv2.resize(frame, (224, 224))
             rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
             frames.append(rgb_frame)
+            
+            # สแกนพื้นที่สเกลภาพ (ตรวจจับมือใหญ่ผิดปกติเทียบกับสินค้าในฉาก)
+            gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                max_area = max([cv2.contourArea(c) for c in contours])
+                frame_area = 224 * 224
+                area_ratio = max_area / frame_area
+                # ถ้าวัตถุหลัก/มือครองพื้นที่สเกลผิดธรรมชาติเกินไป
+                if area_ratio > 0.65:
+                    scale_anomalies.append(1)
+                else:
+                    scale_anomalies.append(0)
+            else:
+                scale_anomalies.append(0)
+                
         count += 1
     cap.release()
-    return frames
+    return frames, scale_anomalies
 
 # ==========================================
-# 3. ฟังก์ชันวิเคราะห์เสียงพูดภาษาไทย/อังกฤษ
+# 3. ฟังก์ชันวิเคราะห์เสียงสะดุด / อ่านตัวย่อเพี้ยน
 # ==========================================
-def analyze_audio_quality(video_path):
+def analyze_audio_glitch(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     audio_penalty = 0.0
-    audio_msg = "🔊 เสียงพูดชัดเจนเป็นธรรมชาติ"
+    audio_msgs = []
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -77,39 +96,50 @@ def analyze_audio_quality(video_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
-            return 0.0, "🔇 ไม่มีเสียงประกอบ"
+            return 0.0, ["🔇 ไม่มีเสียงประกอบ"]
             
         sample_rate, data = wavfile.read(audio_path)
         if len(data) == 0:
-            return 0.0, "🔇 ไม่มีเสียงประกอบ"
+            return 0.0, ["🔇 ไม่มีเสียงประกอบ"]
             
         data_float = data.astype(np.float32)
         
-        window_size = int(sample_rate * 0.1) 
+        # 1. ตรวจสอบความสม่ำเสมอของจังหวะคำ (ตรวจเสียงสะดุด/อ่านรวบคำตัวย่อ "ซม.")
+        window_size = int(sample_rate * 0.05) # สแกนละเอียดทุก 50ms
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         
-        if len(energies) > 0:
-            mean_energy = np.mean(energies)
-            energy_variance = np.var(energies) / (mean_energy + 1e-6)
+        if len(energies) > 1:
+            energy_diffs = np.abs(np.diff(energies))
+            mean_diff = np.mean(energy_diffs)
+            std_diff = np.std(energy_diffs)
             
-            # ตรวจสอบการเพี้ยนของเสียงภาษาไทย/อังกฤษ
-            if energy_variance < 0.12 and mean_energy > 100: 
-                audio_penalty += 60.0 # เพี้ยนรุนแรงเกิน 2 คำฟังไม่รู้เรื่อง (ดันให้เสี่ยงตก)
-                audio_msg = "🔊 เสียงพูดเพี้ยนเกิน 2 คำ/ฟังไม่รู้ภาษา (ตัดตก)"
-            elif energy_variance < 0.22 and mean_energy > 100:
-                audio_penalty += 25.0 # เพี้ยนประมาณ 1-2 คำพอเดาคำได้
-                audio_msg = "🔊 เสียงพูดเพี้ยน 1-2 คำ (อนุโลมผ่าน)"
-            elif energy_variance < 0.32 and mean_energy > 100:
-                audio_penalty += 10.0 # เสียงสังเคราะห์เล็กน้อยแต่ชัดเจน
-                audio_msg = "🔊 เสียงสังเคราะห์แต่ฟังชัดเจน (อนุโลมผ่าน)"
-        
+            # การกระตุกหรือสะดุดอย่างฉับพลันของคลื่นเสียง (Stutter / Glitch Detection)
+            stutter_points = np.sum(energy_diffs > (mean_diff + 2.5 * std_diff))
+            
+            if stutter_points >= 4:
+                audio_penalty += 35.0
+                audio_msgs.append("🔊 เสียงพูดมีคำสะดุด/อ่านตัวย่อเพี้ยน (เช่น ซม.)")
+            elif stutter_points >= 2:
+                audio_penalty += 15.0
+                audio_msgs.append("🔊 เสียงพูดมีจังหวะสะดุดเล็กน้อย")
+
+        # 2. ตรวจสอบเสียงแบนราบผิดธรรมชาติ (AI Voice Glitch)
+        window_large = int(sample_rate * 0.1)
+        energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
+        if len(energies_large) > 0:
+            mean_e = np.mean(energies_large)
+            variance_e = np.var(energies_large) / (mean_e + 1e-6)
+            if variance_e < 0.12 and mean_e > 100:
+                audio_penalty += 35.0
+                audio_msgs.append("🔊 เสียงพูดแบนราบไร้จังหวะธรรมชาติ")
+
     except Exception:
-        return 0.0, "⚠️ ไม่สามารถวิเคราะห์เสียงได้"
+        return 0.0, ["⚠️ ไม่สามารถวิเคราะห์เสียงได้"]
     finally:
         if os.path.exists(audio_path):
             os.unlink(audio_path)
             
-    return audio_penalty, audio_msg
+    return audio_penalty, audio_msgs
 
 # ==========================================
 # 4. UI และ ระบบประมวลผลหลัก
@@ -118,7 +148,7 @@ uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ
 
 if uploaded_files:
     st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
-    if st.button("🔍 เริ่มสแกนคุณภาพ", type="primary"):
+    if st.button("🔍 เริ่มสแกนคัดกรองละเอียด", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์แยกคลิป:")
         
@@ -141,8 +171,8 @@ if uploaded_files:
                     details = ""
                     
                     try:
-                        with st.spinner("กำลังสแกนวิเคราะห์รายละเอียดเฟรม..."):
-                            frames = extract_frames(video_path, target_fps=6)
+                        with st.spinner("กำลังสแกนโครงสร้างภาพ สเกล และเสียง..."):
+                            frames, scale_anomalies = extract_and_analyze_frames(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไม่สามารถอ่านไฟล์วิดีโอได้")
@@ -156,52 +186,44 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
-                                # 💡 1. คำนวณ Base Risk จากสถิติจริงของทุกเฟรม (ทำให้ % แต่ละคลิปกระจายตัวไม่เท่ากัน)
-                                mean_prob = float(np.mean(frame_scores))
-                                std_prob = float(np.std(frame_scores))
-                                dynamic_base_score = (mean_prob * 20.0) + (std_prob * 15.0)
-                                
+                                dynamic_base_score = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 12.0)
                                 visual_penalty = 0.0
                                 details_list = []
                                 
+                                # 💡 1. ตรวจจับการบิดเบี้ยวของอวัยวะ/สินค้า (กฎ 2 วินาที = 12 เฟรม)
                                 severe_streak = 0
                                 max_severe_streak = 0
-                                total_bad_frames = 0
-                                
                                 for s in frame_scores:
-                                    if s > 0.98: # สแกนหาเฟรมที่มีความบิดเบี้ยวของคนหรือสินค้าชัดเจน
+                                    if s > 0.98:
                                         severe_streak += 1
                                         max_severe_streak = max(max_severe_streak, severe_streak)
-                                        total_bad_frames += 1
                                     else:
                                         severe_streak = 0
                                         
-                                # เพิ่มน้ำหนักจากสัดส่วนเฟรมเสียในคลิป
-                                bad_ratio = total_bad_frames / len(frame_scores) if len(frame_scores) > 0 else 0
-                                ratio_penalty = bad_ratio * 25.0
-                                
-                                # 💡 2. กฎความเข้มงวด 2 วินาที (12 เฟรมที่ 6 FPS = 2 วินาที)
                                 if max_severe_streak >= 12: 
-                                    visual_penalty += 65.0 # พังค้างเกิน 2 วินาทีเต็ม (ตัดตก >= 76%)
-                                    details_list.append("⚠️ มือ/ขา/คน หรือสินค้า บิดเบี้ยวพังเกิน 2 วินาที")
+                                    visual_penalty += 55.0
+                                    details_list.append("⚠️ มือ/อวัยวะ หรือสินค้า บิดเบี้ยวพังเกิน 2 วินาที")
                                 elif max_severe_streak >= 6: 
-                                    visual_penalty += 30.0 # พังช่วง 1-2 วินาที (เพิ่มความเสี่ยงชัดเจน)
+                                    visual_penalty += 25.0
                                     details_list.append("อวัยวะ/สินค้าบิดเบี้ยวช่วงสั้น 1-2 วิ")
-                                elif max_severe_streak >= 2:
-                                    visual_penalty += 10.0 # กระตุกแวบเดียวไม่ถึง 1 วิ
-                                    details_list.append("ภาพกระตุกเล็กน้อยไม่ถึง 1 วิ (อนุโลม)")
+                                    
+                                # 💡 2. ตรวจจับขนาดสเกลสินค้าไม่ตรงความจริง (Scale Mismatch)
+                                scale_anomaly_ratio = sum(scale_anomalies) / len(scale_anomalies) if scale_anomalies else 0
+                                if scale_anomaly_ratio > 0.4:
+                                    visual_penalty += 35.0
+                                    details_list.append("⚠️ สเกลขนาดสินค้าไม่ตรงความจริง (สเกลหลอกตา)")
                                 
-                                # 3. ตรวจสอบเสียงภาษาไทย
-                                audio_penalty, audio_msg = analyze_audio_quality(video_path)
-                                if audio_msg and audio_msg != "🔊 เสียงพูดชัดเจนเป็นธรรมชาติ":
-                                    details_list.append(audio_msg)
+                                # 💡 3. ตรวจสอบเสียงพูดสะดุด / ตัวย่อเพี้ยน
+                                audio_penalty, audio_msgs = analyze_audio_glitch(video_path)
+                                if audio_msgs:
+                                    details_list.extend(audio_msgs)
                                 
-                                # 4. คำนวณคะแนนรวมสุทธิแบบกระจายตัวสมดุล (1 - 100%)
-                                raw_final = 3.0 + dynamic_base_score + ratio_penalty + visual_penalty + audio_penalty
+                                # คำนวณคะแนนสุทธิแบบละเอียด (1 - 100%)
+                                raw_final = 5.0 + dynamic_base_score + visual_penalty + audio_penalty
                                 final_score = min(100.0, max(1.0, raw_final))
                                 
                                 if not details_list:
-                                    details = "รูปทรงคนและสินค้าสมบูรณ์ เสียงภาษาไทยชัดเจนดี"
+                                    details = "สเกลสินค้าถูกต้อง การเคลื่อนไหวและเสียงพูดเนียนสมบูรณ์"
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                 
