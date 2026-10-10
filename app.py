@@ -26,12 +26,12 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Face-Aware Scoring 71%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Strict Mass-Aware 71%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 71% คือ ไม่ผ่าน (REJECT)**
-*   🧠 **Face-Aware Logic:** ระบบสแกนหา "ใบหน้าพรีเซนเตอร์" เพื่อแยกหมวดหมู่วิดีโออย่างแม่นยำ
-*   🛍️ **Presenter Mode (เจอหน้าคน):** อนุโลมถุงอาหารสัตว์ให้ยับ ขยับได้ และถือด้วยสองมือได้
-*   📦 **Strict Showcase Mode (เห็นแค่มือชี้):** ล็อคเป้าคลิปโชว์สินค้า โครงสร้างต้องแข็งแรง 100% และมือห้ามใหญ่หลอกตา 
+*   🧠 **Mass-Aware Logic:** คัดแยกโหมดด้วยมวลร่างกาย ป้องกันฉากหลังหรือชั้นไม้หลอกระบบ
+*   🛍️ **Presenter Mode (มวลคนเยอะ):** อนุโลมถุงอาหารสัตว์ สินค้าขยับได้ มือใหญ่ได้
+*   📦 **Strict Showcase (มีแค่มือชี้):** ล็อคเป้าคลิปโชว์สินค้า สเกลมือต้องเล็กสมจริง และห้ามโครงสร้างบิดเบี้ยวเด็ดขาด
 *   ⚡ **Ultra-Fast Batch:** สแกนเร็วด้วย Multi-threading 
 """)
 
@@ -51,7 +51,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์วิเคราะห์หาใบหน้าและสเกล
+# 2. เครื่องยนต์วิเคราะห์หาพิกเซลผิวหนังและสเกล
 # ==========================================
 def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -61,13 +61,11 @@ def process_video_advanced(video_path, target_fps=6):
     interval = max(1, int(round(video_fps / target_fps)))
     frames = []
     skin_areas = []
+    total_skin_areas = []
     obj_areas = []
     
-    # ตัวแปรใหม่สำหรับนับเฟรมที่เจอ "ใบหน้า" (ผิวหนังในโซนบนของภาพ)
-    face_frames = 0
-    total_sampled = 0
-    
-    lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+    # 💡 บีบเกณฑ์สีผิวให้แคบลงและแม่นขึ้น ป้องกันกล่องกระดาษ/ชั้นไม้หลอกว่าเป็นผิวคน
+    lower_skin = np.array([0, 48, 80], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     
     count = 0
@@ -76,29 +74,29 @@ def process_video_advanced(video_path, target_fps=6):
         if not ret: break
         
         if count % interval == 0:
-            total_sampled += 1
             frame_resized = cv2.resize(frame, (224, 224))
             frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
             
             hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            
+            # ลด Noise ที่เกิดจากฉากหลัง
+            kernel_skin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel_skin)
+            
             skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            has_face = False
             if skin_cnts:
-                skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]))
-                # 💡 ตรวจจับใบหน้า: ถ้ามีพื้นที่ผิวหนังขนาดใหญ่พอสมควร อยู่ในพื้นที่ 40% ด้านบนของจอ 
-                for c in skin_cnts:
-                    if cv2.contourArea(c) > 400:
-                        x, y, w, h = cv2.boundingRect(c)
-                        if y < 224 * 0.40: 
-                            has_face = True
-                            break
+                valid_skin = [cv2.contourArea(c) for c in skin_cnts if cv2.contourArea(c) > 200]
+                if valid_skin:
+                    skin_areas.append(max(valid_skin))
+                    total_skin_areas.append(sum(valid_skin))
+                else:
+                    skin_areas.append(0)
+                    total_skin_areas.append(0)
             else:
                 skin_areas.append(0)
-                
-            if has_face:
-                face_frames += 1
+                total_skin_areas.append(0)
             
             gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
             blurred = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -109,8 +107,8 @@ def process_video_advanced(video_path, target_fps=6):
             cv2.rectangle(mask, (int(w*0.15), int(h*0.15)), (int(w*0.85), int(h*0.95)), 255, -1)
             focused_edges = cv2.bitwise_and(edges, edges, mask=mask)
             
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-            closed_edges = cv2.morphologyEx(focused_edges, cv2.MORPH_CLOSE, kernel)
+            kernel_obj = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+            closed_edges = cv2.morphologyEx(focused_edges, cv2.MORPH_CLOSE, kernel_obj)
             obj_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             if obj_cnts:
@@ -120,7 +118,7 @@ def process_video_advanced(video_path, target_fps=6):
                 
         count += 1
     cap.release()
-    return frames, skin_areas, obj_areas, face_frames, total_sampled
+    return frames, skin_areas, total_skin_areas, obj_areas
 
 # ==========================================
 # 3. เครื่องยนต์วิเคราะห์เสียงขั้นสูง
@@ -196,7 +194,7 @@ if uploaded_files:
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Face-Aware Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Strict Mass-Aware Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -223,9 +221,8 @@ if uploaded_files:
                     final_score = 0.0
                     
                     try:
-                        with st.spinner("กำลังวิเคราะห์บริบท..."):
-                            # รับค่าเฟรมใบหน้ามาด้วย
-                            frames, skin_areas, obj_areas, face_frames, total_sampled = process_video_advanced(video_path, target_fps=6)
+                        with st.spinner("กำลังวิเคราะห์โครงสร้าง..."):
+                            frames, skin_areas, total_skin_areas, obj_areas = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย")
@@ -246,17 +243,19 @@ if uploaded_files:
                             details_list = []
                             
                             # ==========================================
-                            # 🧠 ระบบแยกโหมดเด็ดขาด (มีหน้าคน vs มีแต่มือ)
+                            # 🧠 ระบบแยกโหมดด้วยมวลกาย (Body Mass Separation)
                             # ==========================================
-                            # ถ้าเจอใบหน้าเกิน 30% ของความยาวคลิป แปลว่าเป็นคนยืนรีวิว
-                            is_presenter_mode = (face_frames / total_sampled) >= 0.3 if total_sampled > 0 else False
+                            # ถ้าเป็นคนยืน (เช่น คลิปอาหารแมว) พื้นที่ผิวหนังรวมในหน้าจอจะเยอะมาก (เกิน 12000 พิกเซล)
+                            # แต่ถ้ามีแค่มือยื่นมาชี้ของ พื้นที่ผิวหนังจะน้อยมาก 
+                            median_total_skin = np.median([s for s in total_skin_areas if s > 0]) if any(s > 0 for s in total_skin_areas) else 0
                             
-                            # 💡 เพิ่มตัวคูณจับโป๊ะ AI สำหรับโหมดมีแต่มือ 
+                            is_presenter_mode = median_total_skin > 12000 
+                            
                             if is_presenter_mode:
                                 dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
                             else:
-                                # โหมดมีแต่มือ (Showcase) คุมเข้มสุดๆ AI จะถูกคูณคะแนนให้พุ่งปรี๊ด
-                                dynamic_base = (float(np.mean(frame_scores)) * 75.0) + (float(np.std(frame_scores)) * 10.0)
+                                # 💡 โหมดเห็นแต่มือ (Showcase) ลงโทษหนักขึ้น หาก AI จับโป๊ะได้แม้แต่นิดเดียว
+                                dynamic_base = (float(np.mean(frame_scores)) * 40.0) + (float(np.std(frame_scores)) * 15.0)
                             
                             # ==========================================
                             # 💡 กฎที่ 1: สัดส่วนมือเทียบกับสินค้า
@@ -265,11 +264,11 @@ if uploaded_files:
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 300 and o_area > 300:
                                     if is_presenter_mode:
-                                        # คนถือของ: ถืออาหารสัตว์ อนุโลมให้มือใหญ่ได้ 2.5 เท่า
-                                        limit_ratio = 2.5 if o_area > 5000 else 1.5
+                                        # คนถือของอาหารสัตว์: อนุโลมให้มือใหญ่ได้ 2.5 เท่า
+                                        limit_ratio = 2.5
                                     else:
-                                        # ชี้ของ: ของโครงสร้างใหญ่ มือต้องไม่เกิน 40% ของพื้นที่สินค้า!
-                                        limit_ratio = 0.40 
+                                        # 💡 ชี้ของ (ถังขยะ/ชั้นวาง): มือต้องไม่เกิน 30% ของสินค้าโครงสร้างใหญ่!
+                                        limit_ratio = 0.30 
                                         
                                     if (s_area / o_area) > limit_ratio: 
                                         miniature_frames += 1
@@ -279,24 +278,24 @@ if uploaded_files:
                                     visual_penalty += 45.0
                                     details_list.append("⚠️ สเกลสินค้าหลอกตา (สัดส่วนมือพรีเซนเตอร์ใหญ่เกินจริง)")
                                 else:
-                                    visual_penalty += 71.0 # คลิปชั้นวาง/ถังขยะ โดนข้อนี้ปัดตกทันที
-                                    details_list.append("⛔ สเกลผิดธรรมชาติ (มือใหญ่กว่า 40% ของสินค้าโครงสร้างใหญ่)")
+                                    visual_penalty += 71.0 # คลิปชั้นวาง/ถังขยะ โดนจับโป๊ะสเกลจิ๋วปัดตกทันที
+                                    details_list.append("⛔ สเกลผิดธรรมชาติ (มือยื่นมาใหญ่กว่า 30% ของสินค้าชิ้นใหญ่)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง
+                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Rigid Structure Check)
                             # ==========================================
-                            valid_obj = [a for a in obj_areas if a > 300]
+                            valid_obj = [a for a in obj_areas if a > 500]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
                                 
                                 if is_presenter_mode:
-                                    # ถุงอาหารสัตว์อนุโลมให้ยืดหยุ่นได้เยอะ
+                                    # ถุงอาหารสัตว์อนุโลมให้ยืดหยุ่น ยับได้
                                     pass_percent = 30.0
                                     tolerance = 0.85
                                 else:
-                                    # ชั้นวางเหล็ก/ถังขยะ ต้องนิ่งสนิท ห้ามยืดหดเกิน 30% เด็ดขาด!
-                                    pass_percent = 70.0
-                                    tolerance = 0.30 
+                                    # 💡 ชั้นวาง/ถังขยะ: ของแข็งต้องไม่ยืดหด! อนุญาตให้เพี้ยนได้แค่ 15% เท่านั้น
+                                    pass_percent = 65.0
+                                    tolerance = 0.15 
                                     
                                 stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= tolerance)
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
@@ -306,8 +305,8 @@ if uploaded_files:
                                         visual_penalty += 45.0
                                         details_list.append(f"⚠️ ถุงสินค้าทรงไม่นิ่ง (ความนิ่ง {int(stability_percent)}%)")
                                     else:
-                                        visual_penalty += 71.0 # ชั้นวางยืดหด ปัดตกทันที
-                                        details_list.append(f"⛔ โครงสร้างสินค้าบิดเบี้ยว/ไม่เสถียร (ความนิ่ง {int(stability_percent)}%)")
+                                        visual_penalty += 71.0 # โครงสร้างยืดหด ปัดตกทันที
+                                        details_list.append(f"⛔ โครงสร้างสินค้าขยับ/ยืดหดผิดปกติ (จับโป๊ะ AI)")
                             
                             # ==========================================
                             # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt)
@@ -321,9 +320,8 @@ if uploaded_files:
                                 else:
                                     severe_streak = 0
                                     
-                            # โหมดชี้สินค้า แค่ภาพละลาย 5 เฟรมก็ตัดตกแล้ว (เข้มงวดมาก)
-                            melt_limit = 12 if is_presenter_mode else 5
-                            warn_limit = 5 if is_presenter_mode else 2
+                            melt_limit = 12 if is_presenter_mode else 6
+                            warn_limit = 5 if is_presenter_mode else 3
                             
                             if max_severe_streak >= melt_limit:
                                 visual_penalty += 71.0 
@@ -341,7 +339,10 @@ if uploaded_files:
                             final_score = min(100.0, max(1.0, raw_final))
                             
                             if not details_list:
-                                details = "✅ สมบูรณ์: สเกลสมจริง โครงสร้างนิ่ง เสียงชัดเจน"
+                                if is_presenter_mode:
+                                    details = "✅ สมบูรณ์: สเกลถูกต้อง เสียงชัดเจน (หมวดพรีเซนเตอร์)"
+                                else:
+                                    details = "✅ สมบูรณ์: สเกลสมจริง โครงสร้างแข็งแรง (หมวดโชว์สินค้า)"
                             else:
                                 details = " | ".join(list(dict.fromkeys(details_list)))
                             
