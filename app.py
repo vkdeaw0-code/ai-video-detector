@@ -16,13 +16,13 @@ from torchvision import transforms
 # ==========================================
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
-st.set_page_config(page_title="AI Video Inspector (Scale Optimized)", page_icon="🎯", layout="wide")
-st.title("🎯 ระบบตรวจคัดกรองคลิป AI (เวอร์ชันสเกลภาพรวม >50% ผ่าน)")
+st.set_page_config(page_title="AI Video Inspector (Scale & Focus Edition)", page_icon="🎯", layout="wide")
+st.title("🎯 ระบบตรวจคัดกรองคลิป AI (โฟกัสสเกลคนและสินค้า > 60%)")
 st.markdown("""
-**เกณฑ์ตัดตก: 76% ขึ้นไป** | ระบบโฟกัสการวิเคราะห์สเกลคนและสินค้า
-*   📏 **Scale Overall:** ดูภาพรวมคลิป หากสเกลคนและสินค้าถูกต้องเกิน 50% ของคลิป = อนุโลมปล่อยผ่าน
-*   👁️ **Vision:** ตัดตกเฉพาะอวัยวะ/สินค้าละลายหายต่อเนื่องเกิน 2 วินาที
-*   👂 **Audio:** ตัดตกหากเสียงหุ่นยนต์แบนราบ หรือสะดุด/เพี้ยนเกิน 2 คำ
+**เกณฑ์ตัดตก: 76% ขึ้นไป** | ระบบโฟกัสเฉพาะบุคคลและสินค้าหลักที่กำลังนำเสนอ
+*   📏 **Scale Consistency:** สเกลคนและสินค้าต้องถูกต้องคงที่ **> 60% ของคลิป** (อนุโลมจังหวะขยับ 40%)
+*   👁️ **Vision:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
+*   👂 **Audio:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
 """)
 
 @st.cache_resource
@@ -41,7 +41,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์สกัดพื้นที่คนและสินค้า (Area Extraction)
+# 2. เครื่องยนต์สกัดพื้นที่คนและสินค้า (Foreground Focus Area)
 # ==========================================
 def extract_focus_areas(video_path, target_fps=6):
     cap = cv2.VideoCapture(video_path)
@@ -52,7 +52,7 @@ def extract_focus_areas(video_path, target_fps=6):
     frames = []
     
     skin_areas = []
-    fg_areas = []
+    main_obj_areas = []
     
     # ช่วงสีผิว (Skin Tone HSV)
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
@@ -68,22 +68,29 @@ def extract_focus_areas(video_path, target_fps=6):
             rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
             frames.append(rgb_frame)
             
-            # ก. โฟกัสตัวบุคคลและมือ (Skin Tracking)
+            # --- ก. โฟกัสตัวบุคคลและมือ (Skin Tracking) ---
             hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # ดึงเฉพาะพื้นที่ผิวที่ใหญ่ที่สุด (ตัดคนข้างหลังออก)
             skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]) if skin_cnts else 0)
             
-            # ข. โฟกัสสินค้า/โครงสร้างหลัก (Foreground Tracking)
+            # --- ข. โฟกัสสินค้าด้านหน้า (Main Foreground Object) ---
             gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            edges = cv2.Canny(blurred, 50, 150)
-            fg_cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            fg_areas.append(max([cv2.contourArea(c) for c in fg_cnts]) if fg_cnts else 0)
+            blurred = cv2.GaussianBlur(gray, (7, 7), 0) # เบลอเพิ่มขึ้นเพื่อลบรายละเอียดฉากหลัง
+            edges = cv2.Canny(blurred, 60, 150)
+            
+            # ใช้ Morphological closing เพื่อเชื่อมเส้นขอบสินค้าให้เป็นก้อนเดียว
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+            
+            obj_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # ดึงเฉพาะวัตถุที่ใหญ่ที่สุด (ตัดสินค้าบนเชลฟ์ฉากหลังทิ้ง)
+            main_obj_areas.append(max([cv2.contourArea(c) for c in obj_cnts]) if obj_cnts else 0)
             
         count += 1
     cap.release()
-    return frames, skin_areas, fg_areas
+    return frames, skin_areas, main_obj_areas
 
 # ==========================================
 # 3. เครื่องยนต์วิเคราะห์เสียง (Audio Engine)
@@ -106,7 +113,7 @@ def analyze_audio(video_path):
             
         data_float = data.astype(np.float32)
         
-        # 1. ตรวจคำสะดุด/อ่านรวบคำเพี้ยน (Stutter Check)
+        # ตรวจคำสะดุด/อ่านรวบคำเพี้ยน
         window_size = int(sample_rate * 0.05) 
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         
@@ -115,14 +122,14 @@ def analyze_audio(video_path):
             mean_diff, std_diff = np.mean(energy_diffs), np.std(energy_diffs)
             stutter_points = np.sum(energy_diffs > (mean_diff + 3.2 * std_diff))
             
-            if stutter_points > 3: # เพี้ยน/สะดุดเกิน 2 ครั้ง (ตัดตก)
+            if stutter_points > 3: # สะดุดเกิน 2 ครั้ง (ตัดตก)
                 audio_penalty += 65.0
                 audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
             elif stutter_points >= 2: # เพี้ยน 1-2 ครั้ง (อนุโลม)
                 audio_penalty += 15.0
                 audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1-2 คำ (อนุโลม)")
 
-        # 2. ตรวจเสียงแบนราบ (Robotic Check)
+        # ตรวจเสียงแบนราบ
         window_large = int(sample_rate * 0.2) 
         energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
         
@@ -179,8 +186,8 @@ if uploaded_files:
                     
                     try:
                         with st.spinner("สแกนโครงสร้าง สเกล และเสียง..."):
-                            # 1. ดึงภาพและดึงพื้นที่คน/สินค้า
-                            frames, skin_areas, fg_areas = extract_focus_areas(video_path, target_fps=6)
+                            # 1. ดึงภาพและดึงพื้นที่คน/สินค้าหลัก
+                            frames, skin_areas, obj_areas = extract_focus_areas(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์เสีย ไม่สามารถอ่านภาพได้")
@@ -210,34 +217,34 @@ if uploaded_files:
                                     severe_streak = 0
                                     
                             if max_severe_streak >= 12: # พังต่อเนื่องเกิน 2 วินาที (12 เฟรม)
-                                visual_penalty += 65.0 # ปัดตก
-                                details_list.append("⛔ คน/สินค้า บิดเบี้ยวละลายนานเกิน 2 วิ")
+                                visual_penalty += 65.0 
+                                details_list.append("⛔ อวัยวะ/สินค้า บิดเบี้ยวละลายนานเกิน 2 วิ")
                             elif max_severe_streak >= 6: 
-                                visual_penalty += 25.0
+                                visual_penalty += 20.0
                                 details_list.append("อวัยวะ/สินค้าบิดเบี้ยวช่วงสั้น 1-2 วิ")
                                 
-                            # 💡 4. กฎสเกลโดยรวม (Overall Scale Consistency > 50%)
+                            # 💡 4. กฎสเกลโดยรวม (Scale Consistency > 60%)
                             valid_skin = [a for a in skin_areas if a > 500]
-                            valid_fg = [a for a in fg_areas if a > 500]
+                            valid_obj = [a for a in obj_areas if a > 500]
                             
                             skin_consistency = 100.0
-                            fg_consistency = 100.0
+                            obj_consistency = 100.0
                             
                             if valid_skin:
                                 median_skin = np.median(valid_skin)
-                                # นับจำนวนเฟรมที่ขนาดเพี้ยนจากค่ากลางไม่เกิน 45% ถือว่าขนาด "คงที่/สมจริง"
+                                # อนุโลมให้ขนาดต่างจากค่ากลางได้ 45% (การขยับมือเข้า-ออกกล้อง)
                                 consistent_skin = sum(1 for a in valid_skin if abs(a - median_skin) / median_skin <= 0.45)
                                 skin_consistency = (consistent_skin / len(valid_skin)) * 100.0
                                 
-                            if valid_fg:
-                                median_fg = np.median(valid_fg)
-                                consistent_fg = sum(1 for a in valid_fg if abs(a - median_fg) / median_fg <= 0.45)
-                                fg_consistency = (consistent_fg / len(valid_fg)) * 100.0
+                            if valid_obj:
+                                median_obj = np.median(valid_obj)
+                                consistent_obj = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.45)
+                                obj_consistency = (consistent_obj / len(valid_obj)) * 100.0
                                 
-                            # ถ้าความถูกต้อง/คงที่ของสเกลคนหรือสินค้าต่ำกว่าหรือเท่ากับ 50% ตลอดทั้งคลิป ถือว่าตก
-                            if skin_consistency <= 50.0 or fg_consistency <= 50.0:
+                            # ถ้าระดับความคงที่ของสเกลคนหรือสินค้า ต่ำกว่าหรือเท่ากับ 60% ตลอดทั้งคลิป ถือว่าตกทันที
+                            if skin_consistency <= 60.0 or obj_consistency <= 60.0:
                                 visual_penalty += 65.0
-                                details_list.append("⛔ สเกลคน/สินค้าผิดเพี้ยนเกินครึ่งคลิป (AI Morphing)")
+                                details_list.append("⛔ สเกลคน/สินค้าผิดเพี้ยนเกิน 40% ของคลิป (สเกลแกว่ง)")
                                 
                             # 5. วิเคราะห์เสียง
                             audio_penalty, audio_msgs = analyze_audio(video_path)
