@@ -1192,7 +1192,7 @@ def analyze_clip(
         }
 
         if client and sound.get("present") and not intentional_silent:
-            if use_transcription or special:
+            if use_transcription:
                 try:
                     progress(
                         "ถอดเสียงภาษาไทย "
