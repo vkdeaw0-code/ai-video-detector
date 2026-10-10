@@ -27,12 +27,12 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บ
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Pro", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate Scale Engine 71%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Blob & Width Engine 71%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 71% คือ ไม่ผ่าน (REJECT)**
-*   🎯 **Strict Top-Zone Router:** คัดกรองคนยืนรีวิวด้วยมวลพิกเซลขั้นต่ำ 2,500 px (ป้องกันมือยื่นมาหลอกว่าเป็นคน)
-*   🧍‍♂️ **Presenter Mode:** สำหรับคลิปมีคนยืน (อาหารสัตว์/คนบรรยาย) อนุโลมให้แพ็กเกจขยับ ยับได้ สเกลมือยืดหยุ่น
-*   📦 **Showcase Mode:** คลิปโชว์ของใช้/ถังขยะ คุมเข้มสเกลมือด้วยกฎ Giant Hand (ห้ามมือใหญ่เกิน 8% ของจอ) และโครงสร้างต้องนิ่ง
+*   🎯 **Blob Router:** คัดกรองพรีเซนเตอร์ด้วยการ "นับชิ้นส่วนผิวหนัง" ป้องกันแขนยักษ์ลอยมาหลอกระบบ
+*   🧍‍♂️ **Presenter Mode:** คลิปมีคนยืน (แยกหน้า+มือชัดเจน) อนุโลมแพ็กเกจขยับ ยับได้ สเกลยืดหยุ่น
+*   📦 **Showcase Mode:** คลิปโชว์ของใช้/ถังขยะ คุมเข้มสเกลด้วย "ความกว้างมือเทียบสินค้า" และโครงสร้างห้ามบิดเบี้ยว
 *   ⚡ **Turbo Batch:** สแกนไวปรู๊ดปร๊าด พร้อมระบบเสียงที่ยืดหยุ่นต่อการพากย์จริง
 """)
 
@@ -52,7 +52,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์วิเคราะห์สเกลและจำแนกหมวดหมู่ (แก้จุดบอด 100%)
+# 2. เครื่องยนต์วิเคราะห์สเกลขั้นสูง (นับชิ้นส่วน + วัดความกว้าง)
 # ==========================================
 def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -61,9 +61,13 @@ def process_video_advanced(video_path, target_fps=6):
     
     interval = max(1, int(round(video_fps / target_fps)))
     frames = []
-    skin_areas = []
-    obj_areas = []
-    top_zone_skin_pixels = []
+    
+    # เก็บข้อมูลเชิงลึก
+    skin_areas, obj_areas = [], []
+    skin_widths, obj_widths = [], []
+    skin_blob_counts = []
+    top_zone_skin = []
+    total_skin_areas = []
     
     # โทนสีผิว
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
@@ -78,23 +82,33 @@ def process_video_advanced(video_path, target_fps=6):
             frame_resized = cv2.resize(frame, (224, 224))
             frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
             
+            # --- 1. สกัดข้อมูลผิวหนัง (Skin) ---
             hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             
             kernel_skin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel_skin)
             
-            # 💡 Top-Zone Logic: โฟกัส 100 พิกเซลด้านบนของจอ (โซนหัว/ไหล่)
-            top_skin_count = np.sum(skin_mask[:100, :] > 0)
-            top_zone_skin_pixels.append(top_skin_count)
+            # นับพิกเซลด้านบนของจอ
+            top_zone_skin.append(np.sum(skin_mask[:80, :] > 0))
             
             skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if skin_cnts:
-                valid_skin = [cv2.contourArea(c) for c in skin_cnts if cv2.contourArea(c) > 300]
-                skin_areas.append(max(valid_skin) if valid_skin else 0)
-            else:
-                skin_areas.append(0)
+            valid_skin_cnts = [c for c in skin_cnts if cv2.contourArea(c) > 300]
             
+            skin_blob_counts.append(len(valid_skin_cnts)) # นับชิ้นส่วนผิวหนัง
+            
+            if valid_skin_cnts:
+                largest_skin = max(valid_skin_cnts, key=cv2.contourArea)
+                sx, sy, sw, sh = cv2.boundingRect(largest_skin)
+                skin_widths.append(sw)
+                skin_areas.append(cv2.contourArea(largest_skin))
+                total_skin_areas.append(sum(cv2.contourArea(c) for c in valid_skin_cnts))
+            else:
+                skin_widths.append(0)
+                skin_areas.append(0)
+                total_skin_areas.append(0)
+            
+            # --- 2. สกัดข้อมูลสินค้า (Object) ---
             gray_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
             blurred = cv2.GaussianBlur(gray_frame, (7, 7), 0)
             edges = cv2.Canny(blurred, 40, 120)
@@ -109,20 +123,27 @@ def process_video_advanced(video_path, target_fps=6):
             obj_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             if obj_cnts:
-                obj_areas.append(max([cv2.contourArea(c) for c in obj_cnts]))
+                largest_obj = max(obj_cnts, key=cv2.contourArea)
+                ox, oy, ow, oh = cv2.boundingRect(largest_obj)
+                obj_widths.append(ow)
+                obj_areas.append(cv2.contourArea(largest_obj))
             else:
+                obj_widths.append(0)
                 obj_areas.append(0)
                 
         count += 1
     cap.release()
     
-    # 🧠 ตัดสินหมวดหมู่ขั้นเด็ดขาด: 
-    # ต้องมีพื้นที่ผิวหนังโซนบนเกิน 2,500 px ขึ้นไป ถึงจะนับว่าเป็นคนยืนรีวิว
-    # (ป้องกันมือที่ยื่นมาจากด้านบนหลอกระบบ)
-    median_top_skin = np.median([s for s in top_zone_skin_pixels if s > 0]) if any(s > 0 for s in top_zone_skin_pixels) else 0
-    is_presenter = median_top_skin > 2500
+    # 🧠 ตัดสินหมวดหมู่ขั้นเด็ดขาด (Blob Router)
+    median_blobs = np.median([b for b in skin_blob_counts if b > 0]) if any(b > 0 for b in skin_blob_counts) else 0
+    median_top = np.median([t for t in top_zone_skin if t > 0]) if any(t > 0 for t in top_zone_skin) else 0
+    median_total_skin = np.median([s for s in total_skin_areas if s > 0]) if any(s > 0 for s in total_skin_areas) else 0
+    
+    # พรีเซนเตอร์ = ต้องมีชิ้นส่วนผิวหนังแยกกัน >= 2 ชิ้น (เช่น หน้า+มือ) และอยู่ด้านบนจอ
+    # หรือมีมวลผิวหนังรวมใหญ่มากๆ (ซูมหน้าคนชัดๆ)
+    is_presenter = (median_blobs >= 2 and median_top > 1000) or (median_total_skin > 15000)
             
-    return frames, skin_areas, obj_areas, is_presenter
+    return frames, skin_areas, obj_areas, skin_widths, obj_widths, is_presenter
 
 # ==========================================
 # 3. เครื่องยนต์เสียง
@@ -197,7 +218,7 @@ if uploaded_files:
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนขั้นสูงสุด (Ultimate Scale Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนขั้นสูงสุด (Blob & Width Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -205,9 +226,6 @@ if uploaded_files:
         cols = st.columns(3)
         REJECT_THRESHOLD = 71.0 
         progress_bar = st.progress(0)
-        
-        # คำนวณพื้นที่หน้าจอ (224x224)
-        TOTAL_SCREEN_AREA = 224 * 224
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -229,7 +247,7 @@ if uploaded_files:
                     
                     try:
                         with st.spinner("กำลังคัดแยกและวิเคราะห์สเกล..."):
-                            frames, skin_areas, obj_areas, is_presenter = process_video_advanced(video_path, target_fps=6)
+                            frames, skin_areas, obj_areas, skin_widths, obj_widths, is_presenter = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย")
@@ -253,33 +271,30 @@ if uploaded_files:
                                 mode_label = "🧍‍♂️ โหมดพรีเซนเตอร์ (คนยืนรีวิว)"
                                 dynamic_base = (float(np.mean(frame_scores)) * 12.0) + (float(np.std(frame_scores)) * 5.0)
                             else:
-                                mode_label = "📦 โหมดโชว์สินค้า (มือชี้/ถังขยะ)"
+                                mode_label = "📦 โหมดโชว์สินค้า (ชี้ของ/ชั้นวาง)"
                                 dynamic_base = (float(np.mean(frame_scores)) * 55.0) + (float(np.std(frame_scores)) * 15.0)
                             
                             st.caption(f"_{mode_label}_")
                             
                             # ==========================================
-                            # 💡 กฎที่ 1: สเกลมือขั้นสูง (Giant Hand Detector)
+                            # 💡 กฎที่ 1: จับโป๊ะแขน/มือยักษ์ (Giant Arm Detector)
                             # ==========================================
                             miniature_frames = 0
-                            for s_area, o_area in zip(skin_areas, obj_areas):
-                                if s_area > 300: 
-                                    if is_presenter:
-                                        # พรีเซนเตอร์ถือของ อนุโลมสเกลเต็มที่
-                                        pass
-                                    else:
-                                        # โหมดชี้ของ: เช็ค 2 ชั้นเพื่อปราบถังขยะจิ๋ว
-                                        hand_to_obj_ratio = s_area / (o_area + 1)
-                                        hand_to_screen_ratio = s_area / TOTAL_SCREEN_AREA
+                            for s_area, o_area, s_w, o_w in zip(skin_areas, obj_areas, skin_widths, obj_widths):
+                                if s_area > 300 and o_area > 1000: 
+                                    if not is_presenter:
+                                        # เช็ค 2 เงื่อนไข: พื้นที่ และ ความกว้าง
+                                        ratio_area = s_area / (o_area + 1)
+                                        ratio_width = s_w / (o_w + 1)
                                         
-                                        # 1. มือใหญ่กว่า 25% ของสินค้า หรือ 2. มือใหญ่เกิน 8% ของหน้าจอ (มือยักษ์)
-                                        if hand_to_obj_ratio > 0.25 or hand_to_screen_ratio > 0.08:
+                                        # ถ้ามือใหญ่เกิน 30% ของสินค้า หรือ มือกว้างเกิน 60% ของชั้นวาง = ของเล่นจิ๋ว!
+                                        if ratio_area > 0.30 or ratio_width > 0.60:
                                             miniature_frames += 1
                                         
                             if miniature_frames >= 3:
                                 if not is_presenter:
                                     visual_penalty += 71.0 
-                                    details_list.append("⛔ สเกลหลอกตา (มือมีขนาดใหญ่ผิดสัดส่วนอย่างชัดเจน)")
+                                    details_list.append("⛔ สเกลหลอกตาชัดเจน (แขน/มือกว้างเกือบเท่าตัวสินค้า)")
                             
                             # ==========================================
                             # 💡 กฎที่ 2: ความคงที่รูปทรง (Structural Stability)
@@ -301,7 +316,7 @@ if uploaded_files:
                                 if stability_percent <= pass_percent:
                                     if not is_presenter:
                                         visual_penalty += 71.0 
-                                        details_list.append(f"⛔ โครงสร้างสินค้าขยับยืดหดผิดธรรมชาติ")
+                                        details_list.append(f"⛔ โครงสร้างสินค้าบิดเบี้ยว/ยืดหดผิดธรรมชาติ")
                             
                             # ==========================================
                             # 💡 กฎที่ 3: ภาพละลาย (AI Melt)
