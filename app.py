@@ -26,12 +26,12 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Context-Aware Scoring 71%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Face-Aware Scoring 71%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 71% คือ ไม่ผ่าน (REJECT)**
-*   🧠 **Context-Aware:** แยกโหมดอัตโนมัติระหว่างคลิป **"พรีเซนเตอร์ถือของ"** กับ **"เน้นสินค้า/ชี้ของจิ๋ว"**
-*   🛍️ **Presenter Mode:** ถืออาหารสัตว์ผ่านฉลุย อนุโลมรอยยับและการแกว่งถุง
-*   📦 **Strict Showcase Mode:** คลิปโชว์สินค้า/เห็นแต่มือ จะถูกคุมเข้มสเกล หากมือใหญ่เกินจริง หรือสินค้าบิดเบี้ยวจะถูกปัดตกทันที
+*   🧠 **Face-Aware Logic:** ระบบสแกนหา "ใบหน้าพรีเซนเตอร์" เพื่อแยกหมวดหมู่วิดีโออย่างแม่นยำ
+*   🛍️ **Presenter Mode (เจอหน้าคน):** อนุโลมถุงอาหารสัตว์ให้ยับ ขยับได้ และถือด้วยสองมือได้
+*   📦 **Strict Showcase Mode (เห็นแค่มือชี้):** ล็อคเป้าคลิปโชว์สินค้า โครงสร้างต้องแข็งแรง 100% และมือห้ามใหญ่หลอกตา 
 *   ⚡ **Ultra-Fast Batch:** สแกนเร็วด้วย Multi-threading 
 """)
 
@@ -51,7 +51,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์วิเคราะห์แยกบริบทและสเกล
+# 2. เครื่องยนต์วิเคราะห์หาใบหน้าและสเกล
 # ==========================================
 def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -61,9 +61,11 @@ def process_video_advanced(video_path, target_fps=6):
     interval = max(1, int(round(video_fps / target_fps)))
     frames = []
     skin_areas = []
-    total_skin_areas = []
-    skin_parts = []
     obj_areas = []
+    
+    # ตัวแปรใหม่สำหรับนับเฟรมที่เจอ "ใบหน้า" (ผิวหนังในโซนบนของภาพ)
+    face_frames = 0
+    total_sampled = 0
     
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
@@ -74,6 +76,7 @@ def process_video_advanced(video_path, target_fps=6):
         if not ret: break
         
         if count % interval == 0:
+            total_sampled += 1
             frame_resized = cv2.resize(frame, (224, 224))
             frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
             
@@ -81,15 +84,21 @@ def process_video_advanced(video_path, target_fps=6):
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            # เก็บข้อมูลพื้นที่ผิวเพื่อแยกโหมด (มีคนเต็มตัว vs มีแค่มือ)
+            has_face = False
             if skin_cnts:
                 skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]))
-                total_skin_areas.append(sum([cv2.contourArea(c) for c in skin_cnts]))
-                skin_parts.append(sum(1 for c in skin_cnts if cv2.contourArea(c) > 500))
+                # 💡 ตรวจจับใบหน้า: ถ้ามีพื้นที่ผิวหนังขนาดใหญ่พอสมควร อยู่ในพื้นที่ 40% ด้านบนของจอ 
+                for c in skin_cnts:
+                    if cv2.contourArea(c) > 400:
+                        x, y, w, h = cv2.boundingRect(c)
+                        if y < 224 * 0.40: 
+                            has_face = True
+                            break
             else:
                 skin_areas.append(0)
-                total_skin_areas.append(0)
-                skin_parts.append(0)
+                
+            if has_face:
+                face_frames += 1
             
             gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
             blurred = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -111,7 +120,7 @@ def process_video_advanced(video_path, target_fps=6):
                 
         count += 1
     cap.release()
-    return frames, skin_areas, total_skin_areas, skin_parts, obj_areas
+    return frames, skin_areas, obj_areas, face_frames, total_sampled
 
 # ==========================================
 # 3. เครื่องยนต์วิเคราะห์เสียงขั้นสูง
@@ -187,7 +196,7 @@ if uploaded_files:
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Context-Aware Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Face-Aware Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -215,7 +224,8 @@ if uploaded_files:
                     
                     try:
                         with st.spinner("กำลังวิเคราะห์บริบท..."):
-                            frames, skin_areas, total_skin_areas, skin_parts, obj_areas = process_video_advanced(video_path, target_fps=6)
+                            # รับค่าเฟรมใบหน้ามาด้วย
+                            frames, skin_areas, obj_areas, face_frames, total_sampled = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย")
@@ -232,31 +242,34 @@ if uploaded_files:
                                 scores = torch.softmax(output, dim=1)[:, 1].tolist()
                                 frame_scores.extend(scores)
                             
-                            dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
                             visual_penalty = 0.0
                             details_list = []
                             
                             # ==========================================
-                            # 🧠 ระบบ AI คัดแยกโหมด: พรีเซนเตอร์ vs ชี้สินค้า
+                            # 🧠 ระบบแยกโหมดเด็ดขาด (มีหน้าคน vs มีแต่มือ)
                             # ==========================================
-                            median_total_skin = np.median([s for s in total_skin_areas if s > 0]) if any(s > 0 for s in total_skin_areas) else 0
-                            median_skin_parts = np.median([p for p in skin_parts if p > 0]) if any(p > 0 for p in skin_parts) else 0
+                            # ถ้าเจอใบหน้าเกิน 30% ของความยาวคลิป แปลว่าเป็นคนยืนรีวิว
+                            is_presenter_mode = (face_frames / total_sampled) >= 0.3 if total_sampled > 0 else False
                             
-                            # ถ้าเจอพื้นที่คนเยอะ (เกิน 8000) หรือเห็นอวัยวะหลายส่วนพร้อมกัน (หน้า+มือ) ให้เป็นโหมดพรีเซนเตอร์
-                            is_presenter_mode = (median_total_skin > 8000) or (median_skin_parts >= 2)
+                            # 💡 เพิ่มตัวคูณจับโป๊ะ AI สำหรับโหมดมีแต่มือ 
+                            if is_presenter_mode:
+                                dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
+                            else:
+                                # โหมดมีแต่มือ (Showcase) คุมเข้มสุดๆ AI จะถูกคูณคะแนนให้พุ่งปรี๊ด
+                                dynamic_base = (float(np.mean(frame_scores)) * 75.0) + (float(np.std(frame_scores)) * 10.0)
                             
                             # ==========================================
-                            # 💡 กฎที่ 1: สัดส่วนสเกลสัมพันธ์กับบริบท (Contextual Proportion)
+                            # 💡 กฎที่ 1: สัดส่วนมือเทียบกับสินค้า
                             # ==========================================
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
-                                if s_area > 500 and o_area > 500:
+                                if s_area > 300 and o_area > 300:
                                     if is_presenter_mode:
-                                        # คนถือของ: อนุโลมให้ใช้สองมือถือของชิ้นใหญ่ สัดส่วนมือใหญ่ได้
+                                        # คนถือของ: ถืออาหารสัตว์ อนุโลมให้มือใหญ่ได้ 2.5 เท่า
                                         limit_ratio = 2.5 if o_area > 5000 else 1.5
                                     else:
-                                        # ชี้สินค้าล้วนๆ (ไม่เห็นคน): มือต้องไม่ใหญ่กว่าของโครงสร้างหลัก (เช่น มือชี้ชั้นวาง มือต้องดูเล็ก)
-                                        limit_ratio = 0.60 
+                                        # ชี้ของ: ของโครงสร้างใหญ่ มือต้องไม่เกิน 40% ของพื้นที่สินค้า!
+                                        limit_ratio = 0.40 
                                         
                                     if (s_area / o_area) > limit_ratio: 
                                         miniature_frames += 1
@@ -266,24 +279,24 @@ if uploaded_files:
                                     visual_penalty += 45.0
                                     details_list.append("⚠️ สเกลสินค้าหลอกตา (สัดส่วนมือพรีเซนเตอร์ใหญ่เกินจริง)")
                                 else:
-                                    visual_penalty += 71.0 # คลิปของจิ๋ว ปัดตกทันที
-                                    details_list.append("⛔ สเกลของจิ๋วผิดธรรมชาติ (มือโผล่มาใหญ่กว่าสินค้ามาก)")
+                                    visual_penalty += 71.0 # คลิปชั้นวาง/ถังขยะ โดนข้อนี้ปัดตกทันที
+                                    details_list.append("⛔ สเกลผิดธรรมชาติ (มือใหญ่กว่า 40% ของสินค้าโครงสร้างใหญ่)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 2: โครงสร้างและความแข็งแรง (Contextual Stability)
+                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง
                             # ==========================================
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
                                 
                                 if is_presenter_mode:
-                                    # ถุงอาหารสัตว์อนุโลมให้ยับและขยับได้
+                                    # ถุงอาหารสัตว์อนุโลมให้ยืดหยุ่นได้เยอะ
                                     pass_percent = 30.0
                                     tolerance = 0.85
                                 else:
-                                    # ของโชว์เดี่ยวๆ (เช่น ชั้นเหล็ก ถังขยะ) ต้องนิ่งและโครงสร้างไม่กลายร่างเด็ดขาด!
-                                    pass_percent = 60.0
-                                    tolerance = 0.35 
+                                    # ชั้นวางเหล็ก/ถังขยะ ต้องนิ่งสนิท ห้ามยืดหดเกิน 30% เด็ดขาด!
+                                    pass_percent = 70.0
+                                    tolerance = 0.30 
                                     
                                 stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= tolerance)
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
@@ -293,11 +306,11 @@ if uploaded_files:
                                         visual_penalty += 45.0
                                         details_list.append(f"⚠️ ถุงสินค้าทรงไม่นิ่ง (ความนิ่ง {int(stability_percent)}%)")
                                     else:
-                                        visual_penalty += 71.0 # ชั้นวางบิดเบี้ยว ปัดตกทันที
-                                        details_list.append(f"⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (จับโป๊ะ AI ความนิ่ง {int(stability_percent)}%)")
+                                        visual_penalty += 71.0 # ชั้นวางยืดหด ปัดตกทันที
+                                        details_list.append(f"⛔ โครงสร้างสินค้าบิดเบี้ยว/ไม่เสถียร (ความนิ่ง {int(stability_percent)}%)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 3: ภาพละลายจับโป๊ะ AI (Contextual Melt)
+                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt)
                             # ==========================================
                             severe_streak = 0
                             max_severe_streak = 0
@@ -308,8 +321,9 @@ if uploaded_files:
                                 else:
                                     severe_streak = 0
                                     
-                            melt_limit = 12 if is_presenter_mode else 6
-                            warn_limit = 5 if is_presenter_mode else 3
+                            # โหมดชี้สินค้า แค่ภาพละลาย 5 เฟรมก็ตัดตกแล้ว (เข้มงวดมาก)
+                            melt_limit = 12 if is_presenter_mode else 5
+                            warn_limit = 5 if is_presenter_mode else 2
                             
                             if max_severe_streak >= melt_limit:
                                 visual_penalty += 71.0 
