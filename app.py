@@ -17,22 +17,20 @@ from torchvision import transforms
 cv2.setNumThreads(4)
 torch.set_num_threads(4)
 torch.set_grad_enabled(False)
-
-# ล็อกค่า Seed ให้การคำนวณของ AI นิ่ง 100% 
 torch.manual_seed(42)
 np.random.seed(42)
 
 # ==========================================
-# 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
+# 1. ตั้งค่าหน้าเว็บ
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Strict Mass-Aware 71%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate Hybrid Engine 71%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 71% คือ ไม่ผ่าน (REJECT)**
-*   🧠 **Mass-Aware Logic:** คัดแยกโหมดด้วยมวลร่างกาย ป้องกันฉากหลังหรือชั้นไม้หลอกระบบ
-*   🛍️ **Presenter Mode (มวลคนเยอะ):** อนุโลมถุงอาหารสัตว์ สินค้าขยับได้ มือใหญ่ได้
-*   📦 **Strict Showcase (มีแค่มือชี้):** ล็อคเป้าคลิปโชว์สินค้า สเกลมือต้องเล็กสมจริง และห้ามโครงสร้างบิดเบี้ยวเด็ดขาด
-*   ⚡ **Ultra-Fast Batch:** สแกนเร็วด้วย Multi-threading 
+*   👤 **Face & Spatial Switch:** ตรวจจับใบหน้าและมวลร่างกายช่วงบน เพื่อแยกหมวดหมู่วิดีโอแบบ 100%
+*   🛍️ **Presenter Mode:** คนยืนขายอาหารสัตว์/ของใช้ ผ่านได้ลื่นไหล (อนุโลมการจับสินค้า ถุงขยับ)
+*   📦 **Showcase Mode:** คลิปโชว์ของที่มีแต่มือชี้ (เช่น ชั้นวาง ถังขยะ) คุมเข้มสเกลมือและห้ามโครงสร้างบิดเบี้ยว
+*   🎤 **Forgiving Audio:** เสียงพูดมีจังหวะหยุดพักหรือสะดุดเล็กน้อยจะไม่ถูกปัดตก
 """)
 
 @st.cache_resource
@@ -41,9 +39,14 @@ def load_vision_model():
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
-    return model, device
+    
+    # โหลดโมเดลตรวจจับใบหน้ามาตรฐานของ OpenCV
+    face_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    face_cascade = cv2.CascadeClassifier(face_cascade_path)
+    
+    return model, device, face_cascade
 
-model, device = load_vision_model()
+model, device, face_cascade = load_vision_model()
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -51,7 +54,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์วิเคราะห์หาพิกเซลผิวหนังและสเกล
+# 2. เครื่องยนต์วิเคราะห์สเกล & แยกหมวดหมู่ขั้นสูง
 # ==========================================
 def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -61,11 +64,15 @@ def process_video_advanced(video_path, target_fps=6):
     interval = max(1, int(round(video_fps / target_fps)))
     frames = []
     skin_areas = []
-    total_skin_areas = []
     obj_areas = []
     
-    # 💡 บีบเกณฑ์สีผิวให้แคบลงและแม่นขึ้น ป้องกันกล่องกระดาษ/ชั้นไม้หลอกว่าเป็นผิวคน
-    lower_skin = np.array([0, 48, 80], dtype=np.uint8)
+    # ตัวแปรสำหรับจับพฤติกรรมคน
+    face_found_count = 0
+    upper_body_skin_count = 0
+    total_sampled = 0
+    
+    # คืนค่าโทนสีผิวให้กว้างขึ้น เพื่อให้จับพรีเซนเตอร์ในแสงห้างได้
+    lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     
     count = 0
@@ -74,32 +81,34 @@ def process_video_advanced(video_path, target_fps=6):
         if not ret: break
         
         if count % interval == 0:
+            total_sampled += 1
             frame_resized = cv2.resize(frame, (224, 224))
             frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
             
+            gray_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+            
+            # 1. ตรวจจับใบหน้า
+            faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=4, minSize=(20, 20))
+            if len(faces) > 0:
+                face_found_count += 1
+                
+            # 2. ตรวจจับพื้นที่ผิวหนัง (Skin Mask)
             hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             
-            # ลด Noise ที่เกิดจากฉากหลัง
-            kernel_skin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel_skin)
-            
+            # เช็คว่ามีผิวหนังอยู่ "ครึ่งบน" ของจอหรือไม่ (หน้า คอ ไหล่)
+            upper_half_skin = np.sum(skin_mask[:112, :] > 0)
+            if upper_half_skin > 1000: # ถ้ามีพิกเซลผิวหนังครึ่งบนเยอะ
+                upper_body_skin_count += 1
+                
             skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
             if skin_cnts:
-                valid_skin = [cv2.contourArea(c) for c in skin_cnts if cv2.contourArea(c) > 200]
-                if valid_skin:
-                    skin_areas.append(max(valid_skin))
-                    total_skin_areas.append(sum(valid_skin))
-                else:
-                    skin_areas.append(0)
-                    total_skin_areas.append(0)
+                skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]))
             else:
                 skin_areas.append(0)
-                total_skin_areas.append(0)
             
-            gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+            # 3. ตรวจจับสินค้า (Object Mask)
+            blurred = cv2.GaussianBlur(gray_frame, (7, 7), 0)
             edges = cv2.Canny(blurred, 40, 120)
             
             h, w = edges.shape
@@ -118,10 +127,18 @@ def process_video_advanced(video_path, target_fps=6):
                 
         count += 1
     cap.release()
-    return frames, skin_areas, total_skin_areas, obj_areas
+    
+    # 🧠 ตัดสินใจเลือกโหมด (Router Logic):
+    # ถ้าเจอหน้าคนเกิน 5% ของคลิป หรือ เจอผิวหนังช่วงบนจอเกิน 20% ของคลิป -> ให้เป็นโหมดพรีเซนเตอร์
+    is_presenter = False
+    if total_sampled > 0:
+        if (face_found_count / total_sampled) >= 0.05 or (upper_body_skin_count / total_sampled) >= 0.20:
+            is_presenter = True
+            
+    return frames, skin_areas, obj_areas, is_presenter
 
 # ==========================================
-# 3. เครื่องยนต์วิเคราะห์เสียงขั้นสูง
+# 3. เครื่องยนต์เสียง (ลดความโหดลง)
 # ==========================================
 def analyze_audio_strict(video_path):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_aud:
@@ -135,10 +152,10 @@ def analyze_audio_strict(video_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
-            return 0.0, ["🔇 ไม่มีเสียงพากย์ (อนุโลม)"]
+            return 0.0, []
             
         sample_rate, data = wavfile.read(audio_path)
-        if len(data) == 0: return 0.0, ["🔇 ไม่มีเสียงพากย์ (อนุโลม)"]
+        if len(data) == 0: return 0.0, []
             
         data_float = data.astype(np.float32)
         
@@ -152,12 +169,13 @@ def analyze_audio_strict(video_path):
             
             stutter_points = np.sum(energy_diffs > (mean_diff + 3.5 * std_diff))
             
-            if stutter_points > 3:
-                audio_penalty += 71.0 
-                audio_msgs.append("⛔ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
+            # 💡 ลดการหักคะแนนเสียงสะดุดลง เพื่อให้คลิปคนพูดจริงผ่านได้
+            if stutter_points > 4:
+                audio_penalty += 30.0 
+                audio_msgs.append("⚠️ เสียงพูดสะดุดรัว (หักคะแนน)")
             elif stutter_points >= 2:
-                audio_penalty += 15.0 
-                audio_msgs.append("⚠️ เสียงสะดุดเล็กน้อย 1-2 คำ (หักคะแนน)")
+                audio_penalty += 5.0 
+                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย (ผ่าน)")
 
         window_large = int(sample_rate * 0.2)
         energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
@@ -166,12 +184,13 @@ def analyze_audio_strict(video_path):
             mean_e = np.mean(energies_large)
             variance_e = np.var(energies_large) / (mean_e + 1e-6)
             
+            # โทษเสียงหุ่นยนต์ยังคงหนักอยู่ (ถ้าเป็นหุ่นยนต์ชัดเจนตัดตก)
             if variance_e < 0.08 and mean_e > 100:
                 audio_penalty += 71.0
-                audio_msgs.append("⛔ เสียงแบนราบเป็นหุ่นยนต์/ฟังไม่รู้ภาษา")
+                audio_msgs.append("⛔ เสียงแบนราบเป็นหุ่นยนต์/AI 100%")
             elif variance_e < 0.25 and mean_e > 100:
-                audio_penalty += 15.0
-                if not audio_msgs: audio_msgs.append("⚠️ เสียงพูดคล้าย AI (หักคะแนน)")
+                audio_penalty += 10.0
+                if not audio_msgs: audio_msgs.append("⚠️ เสียงพูดโทนเดียวคล้าย AI")
     except Exception:
         return 0.0, ["⚠️ ระบบไม่สามารถวิเคราะห์คลื่นเสียงได้"]
     finally:
@@ -189,12 +208,12 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     if len(uploaded_files) > 50:
-        st.error(f"⚠️ ตรวจพบไฟล์ {len(uploaded_files)} คลิป! เซิร์ฟเวอร์ฟรีรองรับรวดเดียวสูงสุด 50 ไฟล์")
+        st.error(f"⚠️ ตรวจพบไฟล์ {len(uploaded_files)} คลิป! เซิร์ฟเวอร์รองรับสูงสุด 50 ไฟล์")
         st.stop()
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Strict Mass-Aware Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนอัจฉริยะ (Hybrid Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -221,8 +240,8 @@ if uploaded_files:
                     final_score = 0.0
                     
                     try:
-                        with st.spinner("กำลังวิเคราะห์โครงสร้าง..."):
-                            frames, skin_areas, total_skin_areas, obj_areas = process_video_advanced(video_path, target_fps=6)
+                        with st.spinner("กำลังแยกแยะบริบทคลิป..."):
+                            frames, skin_areas, obj_areas, is_presenter = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย")
@@ -242,74 +261,66 @@ if uploaded_files:
                             visual_penalty = 0.0
                             details_list = []
                             
-                            # ==========================================
-                            # 🧠 ระบบแยกโหมดด้วยมวลกาย (Body Mass Separation)
-                            # ==========================================
-                            # ถ้าเป็นคนยืน (เช่น คลิปอาหารแมว) พื้นที่ผิวหนังรวมในหน้าจอจะเยอะมาก (เกิน 12000 พิกเซล)
-                            # แต่ถ้ามีแค่มือยื่นมาชี้ของ พื้นที่ผิวหนังจะน้อยมาก 
-                            median_total_skin = np.median([s for s in total_skin_areas if s > 0]) if any(s > 0 for s in total_skin_areas) else 0
-                            
-                            is_presenter_mode = median_total_skin > 12000 
-                            
-                            if is_presenter_mode:
-                                dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
+                            # คำนวณความเสี่ยงจาก AI ละลาย (Baseline)
+                            if is_presenter:
+                                dynamic_base = (float(np.mean(frame_scores)) * 15.0) + (float(np.std(frame_scores)) * 5.0)
                             else:
-                                # 💡 โหมดเห็นแต่มือ (Showcase) ลงโทษหนักขึ้น หาก AI จับโป๊ะได้แม้แต่นิดเดียว
-                                dynamic_base = (float(np.mean(frame_scores)) * 40.0) + (float(np.std(frame_scores)) * 15.0)
+                                # คลิปโชว์ของไม่มีคน คุม AI เข้มขึ้น
+                                dynamic_base = (float(np.mean(frame_scores)) * 40.0) + (float(np.std(frame_scores)) * 10.0)
                             
                             # ==========================================
-                            # 💡 กฎที่ 1: สัดส่วนมือเทียบกับสินค้า
+                            # 💡 กฎที่ 1: สเกลมือ (Hand Proportion)
                             # ==========================================
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 300 and o_area > 300:
-                                    if is_presenter_mode:
-                                        # คนถือของอาหารสัตว์: อนุโลมให้มือใหญ่ได้ 2.5 เท่า
-                                        limit_ratio = 2.5
+                                    if is_presenter:
+                                        # คนถือของ: อนุโลมเต็มที่ สัดส่วนมือไม่จำกัด (เพราะบางทีกอดของ หรือของเล็ก)
+                                        limit_ratio = 5.0 
                                     else:
-                                        # 💡 ชี้ของ (ถังขยะ/ชั้นวาง): มือต้องไม่เกิน 30% ของสินค้าโครงสร้างใหญ่!
-                                        limit_ratio = 0.30 
+                                        # ชี้ของอย่างเดียว: มือห้ามใหญ่เกิน 35% ของสินค้า
+                                        limit_ratio = 0.35 
                                         
                                     if (s_area / o_area) > limit_ratio: 
                                         miniature_frames += 1
                                         
                             if miniature_frames >= 3:
-                                if is_presenter_mode:
-                                    visual_penalty += 45.0
-                                    details_list.append("⚠️ สเกลสินค้าหลอกตา (สัดส่วนมือพรีเซนเตอร์ใหญ่เกินจริง)")
+                                if is_presenter:
+                                    # พรีเซนเตอร์ถือของ ไม่หักคะแนนสเกลเลย (อนุโลมสุดๆ)
+                                    pass
                                 else:
-                                    visual_penalty += 71.0 # คลิปชั้นวาง/ถังขยะ โดนจับโป๊ะสเกลจิ๋วปัดตกทันที
-                                    details_list.append("⛔ สเกลผิดธรรมชาติ (มือยื่นมาใหญ่กว่า 30% ของสินค้าชิ้นใหญ่)")
+                                    visual_penalty += 71.0 # คลิปชั้นวาง/ถังขยะ สเกลหลอกตา ปัดตกทันที
+                                    details_list.append("⛔ สเกลผิดธรรมชาติ (สัดส่วนมือลอยใหญ่ผิดปกติ)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Rigid Structure Check)
+                            # 💡 กฎที่ 2: ความคงที่รูปทรง (Structural Stability)
                             # ==========================================
                             valid_obj = [a for a in obj_areas if a > 500]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
                                 
-                                if is_presenter_mode:
-                                    # ถุงอาหารสัตว์อนุโลมให้ยืดหยุ่น ยับได้
-                                    pass_percent = 30.0
+                                if is_presenter:
+                                    # ถุงอาหารสัตว์/ของในมือ: ยืดหดได้เต็มที่ (ผ่าน 100%)
+                                    pass_percent = 20.0
                                     tolerance = 0.85
                                 else:
-                                    # 💡 ชั้นวาง/ถังขยะ: ของแข็งต้องไม่ยืดหด! อนุญาตให้เพี้ยนได้แค่ 15% เท่านั้น
-                                    pass_percent = 65.0
-                                    tolerance = 0.15 
+                                    # โชว์ชั้นวาง/ถังขยะ: ต้องนิ่งมาก ห้ามยืดหดเกิน 20%
+                                    pass_percent = 60.0
+                                    tolerance = 0.20 
                                     
                                 stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= tolerance)
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
                                 
                                 if stability_percent <= pass_percent:
-                                    if is_presenter_mode:
-                                        visual_penalty += 45.0
-                                        details_list.append(f"⚠️ ถุงสินค้าทรงไม่นิ่ง (ความนิ่ง {int(stability_percent)}%)")
+                                    if is_presenter:
+                                        # ไม่ทำโทษคลิปพรีเซนเตอร์
+                                        pass
                                     else:
-                                        visual_penalty += 71.0 # โครงสร้างยืดหด ปัดตกทันที
-                                        details_list.append(f"⛔ โครงสร้างสินค้าขยับ/ยืดหดผิดปกติ (จับโป๊ะ AI)")
+                                        visual_penalty += 71.0 # ชั้นวางยืดหด ปัดตก
+                                        details_list.append(f"⛔ โครงสร้างสินค้าบิดเบี้ยว/ไม่เสถียร (จับโป๊ะ AI)")
                             
                             # ==========================================
-                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt)
+                            # 💡 กฎที่ 3: ภาพละลาย (AI Melt)
                             # ==========================================
                             severe_streak = 0
                             max_severe_streak = 0
@@ -320,29 +331,26 @@ if uploaded_files:
                                 else:
                                     severe_streak = 0
                                     
-                            melt_limit = 12 if is_presenter_mode else 6
-                            warn_limit = 5 if is_presenter_mode else 3
-                            
-                            if max_severe_streak >= melt_limit:
+                            if max_severe_streak >= 12: # ละลายยาวเกิน 2 วิ โดนตกทุกโหมด
                                 visual_penalty += 71.0 
-                                details_list.append(f"⛔ ภาพละลายจับโป๊ะ AI ต่อเนื่อง ({max_severe_streak} เฟรม)")
-                            elif max_severe_streak >= warn_limit: 
-                                visual_penalty += 15.0 
+                                details_list.append(f"⛔ ภาพละลายบิดเบี้ยวต่อเนื่องชัดเจน")
+                            elif max_severe_streak >= 5 and not is_presenter: 
+                                visual_penalty += 30.0 
                                 details_list.append("⚠️ ภาพบิดเบี้ยวช่วงสั้น (หักคะแนน)")
                                 
                             # กฎที่ 4: เสียง
                             audio_penalty, audio_msgs = analyze_audio_strict(video_path)
                             if audio_msgs: details_list.extend(audio_msgs)
                             
-                            # สรุปคะแนนสุทธิ
+                            # สรุปคะแนน
                             raw_final = 2.0 + dynamic_base + visual_penalty + audio_penalty
                             final_score = min(100.0, max(1.0, raw_final))
                             
                             if not details_list:
-                                if is_presenter_mode:
-                                    details = "✅ สมบูรณ์: สเกลถูกต้อง เสียงชัดเจน (หมวดพรีเซนเตอร์)"
+                                if is_presenter:
+                                    details = "✅ สมบูรณ์ (Presenter Mode): สเกลคนและสินค้าเป็นธรรมชาติ"
                                 else:
-                                    details = "✅ สมบูรณ์: สเกลสมจริง โครงสร้างแข็งแรง (หมวดโชว์สินค้า)"
+                                    details = "✅ สมบูรณ์ (Showcase Mode): สเกลสมจริง โครงสร้างแข็งแรง"
                             else:
                                 details = " | ".join(list(dict.fromkeys(details_list)))
                             
@@ -369,7 +377,7 @@ if uploaded_files:
                         if torch.cuda.is_available(): 
                             torch.cuda.empty_cache()
                             torch.cuda.ipc_collect()
-                        time.sleep(0.2) 
+                        time.sleep(0.1) 
                     
                     results_summary.append({
                         "ลำดับ": idx + 1,
