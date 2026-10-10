@@ -14,11 +14,11 @@ from PIL import Image
 from torchvision import transforms
 
 # ==========================================
-# 1. ตั้งค่าและเตรียมโมเดล
+# 1. ตั้งค่าหน้าเว็บ Streamlit และโหลดโมเดล
 # ==========================================
-st.set_page_config(page_title="AI Video Detector Ultra", page_icon="🎬", layout="wide")
-st.title("🎬 ระบบประเมินคุณภาพคลิปวิดีโอ AI (เวอร์ชันปรับจูนพิเศษ)")
-st.write("ระบบวิเคราะห์ภาพรวม (1-100%): **เกณฑ์ตัดตกที่ 76% ขึ้นไป** | อนุโลมจุดบกพร่องเล็กน้อย ตัดตกเฉพาะคลิปที่มือ/ร่างกาย/เงากระจกหายเกิน 1 วินาที หรือเสียงพูดฟังไม่รู้เรื่อง")
+st.set_page_config(page_title="AI Video Inspector Pro", page_icon="🎬", layout="wide")
+st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (เวอร์ชันปล่อยผ่านคลิปขายของสมูท)")
+st.write("ระบบตรวจจับเฉพาะจุดพังรุนแรง: **เกณฑ์ตัดตก 76% ขึ้นไป** | ปล่อยผ่านคลิปขายของที่มีการซูมกล้อง แพนภาพ และเสียงพูดชัดเจน | ตัดตกเฉพาะอวัยวะ/สินค้าพังเกิน 1 วินาที หรือเสียงเพี้ยนฟังไม่รู้เรื่อง")
 
 @st.cache_resource
 def load_detection_models():
@@ -37,7 +37,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. ฟังก์ชันประมวลผล 
+# 2. ฟังก์ชันสแกนภาพวิดีโอ (6 FPS)
 # ==========================================
 def extract_frames(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -60,10 +60,13 @@ def extract_frames(video_path, target_fps=6):
     cap.release()
     return frames
 
+# ==========================================
+# 3. ฟังก์ชันวิเคราะห์เสียงพูด (ไทย / อังกฤษ)
+# ==========================================
 def analyze_audio_quality(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
     audio_penalty = 0.0
-    audio_msg = "🔊 เสียงพูดเป็นธรรมชาติ/ฟังรู้เรื่อง"
+    audio_msg = "🔊 เสียงพูดชัดเจนเป็นธรรมชาติ"
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
@@ -81,27 +84,22 @@ def analyze_audio_quality(video_path):
             return 0.0, "🔇 ไม่มีเสียงประกอบ"
             
         data_float = data.astype(np.float32)
-        fft_data = np.abs(np.fft.rfft(data_float))
-        fft_sum = np.sum(fft_data)
         
-        # ตรวจความถี่เสียง (ถ้าเพี้ยนเล็กน้อย = อนุโลม)
-        if fft_sum > 0:
-            normalized_fft = fft_data / fft_sum
-            flatness = float(np.exp(np.mean(np.log(normalized_fft + 1e-12))))
-            if flatness < 1e-6 or flatness > 2.5e-3:
-                audio_penalty += 20.0 # เพี้ยนเล็กน้อย
-                
+        # คำนวณความผันผวนพลังงานเสียง (Energy Variance)
         window_size = int(sample_rate * 0.1) 
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
+        
         if len(energies) > 0:
-            energy_variance = np.var(energies) / (np.mean(energies) + 1e-6)
-            if energy_variance < 0.22: 
-                audio_penalty += 45.0 # เสียงแบนราบฟังไม่เป็นภาษา (ตัดตก)
-                
-        if audio_penalty >= 60.0:
-            audio_msg = "🔊 เสียงพูดเพี้ยนมาก/ฟังไม่รู้ภาษา (ตัดตก)"
-        elif audio_penalty > 0:
-            audio_msg = "🔊 เสียงสังเคราะห์/เพี้ยนเล็กน้อย (อนุโลมผ่าน)"
+            mean_energy = np.mean(energies)
+            energy_variance = np.var(energies) / (mean_energy + 1e-6)
+            
+            # จะลงโทษหนักก็ต่อเมื่อเสียงแบนราบเป็นหุ่นยนต์ไร้จังหวะหายใจอย่างรุนแรง (ฟังไม่เป็นภาษา)
+            if energy_variance < 0.12 and mean_energy > 100: 
+                audio_penalty += 70.0 # ตัดตกทันที
+                audio_msg = "🔊 เสียงพูดเพี้ยนมาก/ฟังไม่รู้ภาษา (ตัดตก)"
+            elif energy_variance < 0.28 and mean_energy > 100:
+                audio_penalty += 15.0 # เสียงสังเคราะห์เล็กน้อยแต่ยังฟังรู้เรื่อง (อนุโลมให้ผ่าน)
+                audio_msg = "🔊 มีเสียงสังเคราะห์แต่ฟังรู้เรื่อง (อนุโลมผ่าน)"
         
     except Exception:
         return 0.0, "⚠️ ไม่สามารถวิเคราะห์เสียงได้"
@@ -112,9 +110,9 @@ def analyze_audio_quality(video_path):
     return audio_penalty, audio_msg
 
 # ==========================================
-# 3. UI และ ระบบประมวลผลหลัก
+# 4. UI และ ระบบประมวลผลหลัก
 # ==========================================
-uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - เลือกพร้อมกันได้หลายไฟล์", type=["mp4", "mov", "avi"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - อัปโหลดได้หลายไฟล์พร้อมกัน", type=["mp4", "mov", "avi"], accept_multiple_files=True)
 
 if uploaded_files:
     st.info(f"📁 เลือกไว้ทั้งหมด {len(uploaded_files)} คลิป")
@@ -124,29 +122,29 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        THRESHOLD = 76.0 # 💡 ตัดตกที่ 76% ขึ้นไป
+        REJECT_THRESHOLD = 76.0 # 💡 ตัดตกที่ 76% ขึ้นไป
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    display_name = f"{uploaded_file.name[:20]}..." if len(uploaded_file.name) > 20 else uploaded_file.name
+                    display_name = f"{uploaded_file.name[:22]}..." if len(uploaded_file.name) > 22 else uploaded_file.name
                     st.caption(f"🎬 คลิปที่ {idx+1}: **{display_name}**")
                     
                     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    final_score = 5.0 # 💡 ฐานคะแนนเริ่มต้นเริ่มต้นที่ 5%
+                    final_score = 5.0 # คะแนนฐานตั้งต้นเพียง 5%
                     status = "ERROR"
                     details = ""
                     
                     try:
-                        with st.spinner("กำลังสแกนวิเคราะห์..."):
+                        with st.spinner("กำลังสแกนโครงสร้างภาพและเสียง..."):
                             frames = extract_frames(video_path, target_fps=6)
                             
                             if not frames:
-                                st.caption("⚠️ ไม่สามารถอ่านภาพจากวิดีโอได้")
+                                st.caption("⚠️ ไม่สามารถอ่านไฟล์วิดีโอได้")
                             else:
                                 frame_scores = []
                                 with torch.no_grad():
@@ -160,42 +158,40 @@ if uploaded_files:
                                 visual_penalty = 0.0
                                 details_list = []
                                 
-                                # เช็กการเคลื่อนไหวผิดปกติ (มือหาย / กระพริบในกระจก / ร่างกายละลาย)
-                                max_flaw_streak = 0
-                                current_streak = 0
+                                # เช็กจุดบกพร่องร้ายแรง (ต้องเป็นเฟรมที่โมเดลมั่นใจสูงเกือบ 100% ว่าพังจริง)
+                                severe_streak = 0
+                                max_severe_streak = 0
                                 
                                 for s in frame_scores:
-                                    if s > 0.975: # ความแน่ชัดของความผิดปกติระดับสูง
-                                        current_streak += 1
-                                        max_flaw_streak = max(max_flaw_streak, current_streak)
+                                    if s > 0.985: # ปรับเกณฑ์ความแน่ชัดให้สูงขึ้น เพื่อไม่ให้จับผิดการขยับซูมกล้อง
+                                        severe_streak += 1
+                                        max_severe_streak = max(max_severe_streak, severe_streak)
                                     else:
-                                        current_streak = 0
+                                        severe_streak = 0
                                         
-                                # กฎ 1 วินาที (6 เฟรม = 1 วินาที)
-                                if max_flaw_streak >= 6: 
-                                    visual_penalty += 72.0 # ผิดปกติเกิน 1 วิ พุ่งเกิน 76% ตัดตกทันที
-                                    details_list.append("⚠️ มือ/ร่างกาย/เงากระจก บิดเบี้ยวหรือหายเกิน 1 วินาที")
-                                elif max_flaw_streak >= 2:
-                                    visual_penalty += 10.0 # แวบเดียวไม่ถึงวิ บวกแค่นิดเดียว (อนุโลมผ่าน)
+                                # กฎ 1 วินาที (6 เฟรมที่ 6 FPS = 1 วินาทีเต็ม)
+                                if max_severe_streak >= 6: 
+                                    visual_penalty += 75.0 # หากมือ/ขา/อวัยวะ ละลายพังติดต่อกันเกิน 1 วิ ตัดตกทันที
+                                    details_list.append("⚠️ มือ/ขา/อวัยวะ หรือสินค้า บิดเบี้ยวพังเกิน 1 วินาที")
+                                elif max_severe_streak >= 2:
+                                    visual_penalty += 10.0 # แวบเดียวไม่ถึงวินาที บวกแต้มเล็กน้อย (ผ่านสบาย)
                                     details_list.append("ภาพกระตุก/ละลายเล็กน้อย ไม่ถึง 1 วิ (อนุโลม)")
                                 
                                 # ตรวจสอบเสียง
                                 audio_penalty, audio_msg = analyze_audio_quality(video_path)
+                                if audio_msg and audio_msg != "🔊 เสียงพูดชัดเจนเป็นธรรมชาติ":
+                                    details_list.append(audio_msg)
                                 
-                                # คำนวณคะแนนรวมสุทธิ (จำกัดที่ 1-100%)
+                                # คำนวณคะแนนรวมสุทธิ (จำกัดช่วงที่ 1 - 100%)
                                 final_score = min(100.0, max(1.0, final_score + visual_penalty + audio_penalty))
                                 
-                                if audio_msg and audio_msg != "🔊 เสียงพูดเป็นธรรมชาติ/ฟังรู้เรื่อง":
-                                    details_list.append(audio_msg)
-                                        
-                                # ข้อความรายละเอียด
                                 if not details_list:
-                                    details = "คลิปสมบูรณ์ การเคลื่อนไหวและเสียงเป็นธรรมชาติ"
+                                    details = "คลิปภาพสวยเนียน การเคลื่อนไหวและเสียงเป็นธรรมชาติ"
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                 
-                                # ประเมินผล 2 ระดับ ตัดตกที่ >= 76%
-                                if final_score >= THRESHOLD:
+                                # ตัดสินเกรด (<76% ผ่าน, >=76% ไม่ผ่าน)
+                                if final_score >= REJECT_THRESHOLD:
                                     status = "REJECT"
                                     st.error(f"❌ **ไม่ผ่าน** ({final_score:.0f}%)")
                                     st.write(f"*{details}*")
@@ -225,7 +221,7 @@ if uploaded_files:
                     })
         
         # ==========================================
-        # 4. แดชบอร์ดสรุปผลรวม
+        # 5. แดชบอร์ดสรุปผลรวม
         # ==========================================
         st.divider()
         st.subheader("📋 แดชบอร์ดสรุปผลรวม")
@@ -257,4 +253,4 @@ if uploaded_files:
             else:
                 st.caption("ไม่มีคลิปในกลุ่มนี้")
         
-        st.success("🎉 ตรวจสอบเสร็จสิ้น ล้างความจำแคชเรียบร้อยแล้ว")
+        st.success("🎉 ตรวจสอบเสร็จสิ้น คืนค่าความจำ RAM เรียบร้อยแล้ว")
