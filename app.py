@@ -52,29 +52,28 @@ def reference_image(upload):
 with st.sidebar:
     st.header("ตั้งค่าการตรวจ")
 
+    
     api_key = st.text_input(
-        "OpenAI API Key",
+        "Gemini API Key",
         type="password",
         value=(
-            os.getenv("OPENAI_API_KEY", "")
-            or secret("OPENAI_API_KEY")
+            os.getenv("GEMINI_API_KEY", "")
+            or secret("GEMINI_API_KEY")
         ),
     )
 
     image_model = st.selectbox(
-        "โมเดลภาพ",
-        ["gpt-4.1", "gpt-4.1-mini"],
+        "โมเดลตรวจภาพและเสียง",
+        [
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite"
+        ],
+        index=0,
     )
 
-    audio_model = st.text_input(
-        "โมเดลฟังเสียง",
-        "gpt-audio-1.5",
-    )
+    audio_model = "gemini-3.8-flash"
+    transcription_model = "gemini-3.8-flash"
 
-    transcription_model = st.text_input(
-        "โมเดลถอดเสียง",
-        "gpt-transcribe",
-    )
 
     sample_fps = st.slider(
         "ภาพตัวอย่างต่อวินาที",
