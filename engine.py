@@ -1112,13 +1112,12 @@ def analyze_clip(
 
         if api_key:
             try:
-                from openai import OpenAI
-
-                client = OpenAI(
-                    api_key=api_key,
-                    max_retries=1,
-                    timeout=120.0,
+                from gemini_bridge import GeminiAdapter
+                client = GeminiAdapter(
+                api_key=api_key,
+                model=model
                 )
+
 
                 sheets = _make_sheets(video["samples"])
 
