@@ -1181,10 +1181,10 @@ def analyze_clip(
                     "ตรวจภาพ AI ไม่สำเร็จ: " + str(exc)[:240]
                 )
 
+        
         else:
-            error = (
-                "ยังไม่มี OpenAI API key "
-                "ตรวจได้เฉพาะเทคนิค ไม่ตัดสิน PASS"
+            error = "ยังไม่มี Gemini API Key — ตรวจได้เฉพาะเทคนิค ไม่ตัดสิน PASS"
+
             )
 
         special = chosen_profile in {
