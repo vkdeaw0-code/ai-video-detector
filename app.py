@@ -13,97 +13,102 @@ import time
 from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
+from ultralytics import YOLO  # 💡 นำเข้าโมเดลแยกประเภทสินค้า
 
-# ล็อกค่า Seed ให้การคำนวณของ AI นิ่ง 100% ในทุกๆ รอบ
 torch.manual_seed(42)
 np.random.seed(42)
 
-# ==========================================
-# 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
-# ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate - Strict 70%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (YOLO Dynamic Scale)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
-*   📏 **Proportion Logic:** อนุโลมการถ่ายแบบซูมใกล้ (Close-up) ตัดตกเฉพาะสเกลหลอกตาที่มือมีขนาดใหญ่บังสินค้าเกือบมิด (>75%)
-*   📦 **Scale Stability:** สเกลคนและสินค้าต้องถูกต้องและรูปทรงคงที่ 
-*   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
-*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
+*   📏 **Smart Proportion:** ใช้ AI (YOLO) จับประเภทสินค้าและปรับเกณฑ์สัดส่วนมืออัตโนมัติตามชนิดสินค้า
+*   📦 **Scale Stability:** อนุโลมการขยับพลิกสินค้า แต่โครงสร้างหลักต้องไม่ยืดหดกลายร่าง 
+*   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน 2 วินาที
+*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์ หรืออ่านสะดุดเกิน 2 คำ
 """)
 
 @st.cache_resource
-def load_vision_model():
+def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
-    model = model.to(device)
-    model.eval()
-    return model, device
+    # โมเดลจับความผิดปกติของภาพ
+    vision_model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
+    vision_model = vision_model.to(device)
+    vision_model.eval()
+    
+    # 💡 โมเดล YOLOv8 สำหรับแยกประเภทและตรวจจับกล่องสินค้า
+    yolo_model = YOLO('yolov8n.pt') 
+    
+    return vision_model, yolo_model, device
 
-model, device = load_vision_model()
+vision_model, yolo_model, device = load_models()
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# ==========================================
-# 2. เครื่องยนต์วิเคราะห์สเกลและรูปทรง
-# ==========================================
+# หมวดหมู่สินค้าตาม COCO Dataset
+SMALL_OBJ = [39, 41, 42, 43, 44, 45, 63, 64, 65, 67, 73, 76, 79] # ขวด, แก้ว, คีย์บอร์ด, หนังสือ ฯลฯ
+MEDIUM_OBJ = [24, 25, 26, 27, 28, 32, 68, 74] # กระเป๋า, ร่ม, ไมโครเวฟ, นาฬิกา ฯลฯ
+LARGE_OBJ = [56, 57, 58, 59, 60, 62, 70, 71, 72] # เก้าอี้, โซฟา, เตียง, ทีวี, ตู้เย็น ฯลฯ
+
 def process_video_advanced(video_path, target_fps=6):
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0 or np.isnan(video_fps): video_fps = 30
     
     interval = max(1, int(round(video_fps / target_fps)))
-    frames = []
-    
-    skin_areas = []
-    obj_areas = []
+    frames, skin_areas, obj_areas, dynamic_thresholds = [], [], [], []
     
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     
     count = 0
     while cap.isOpened():
-        ret, frame = cap.read()
+        ret = cap.grab()
         if not ret: break
         
         if count % interval == 0:
-            frame_resized = cv2.resize(frame, (224, 224))
-            frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
-            
-            # --- 2.1 จับพื้นที่มือ/อวัยวะ ---
-            hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
-            skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
-            skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]) if skin_cnts else 0)
-            
-            # --- 2.2 จับพื้นที่สินค้าหลักตรงกลางจอ ---
-            gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-            edges = cv2.Canny(blurred, 40, 120)
-            
-            h, w = edges.shape
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.rectangle(mask, (int(w*0.15), int(h*0.15)), (int(w*0.85), int(h*0.95)), 255, -1)
-            focused_edges = cv2.bitwise_and(edges, edges, mask=mask)
-            
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-            closed_edges = cv2.morphologyEx(focused_edges, cv2.MORPH_CLOSE, kernel)
-            obj_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if obj_cnts:
-                obj_areas.append(max([cv2.contourArea(c) for c in obj_cnts]))
-            else:
-                obj_areas.append(0)
+            ret, frame = cap.retrieve()
+            if ret:
+                frame_resized = cv2.resize(frame, (224, 224))
+                frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
                 
+                # จับพื้นที่ผิว/มือ
+                hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
+                skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+                skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]) if skin_cnts else 0)
+                
+                # 💡 ใช้ YOLO ค้นหาสินค้าหลักในเฟรม (ไม่ยึดติดแค่ตรงกลาง)
+                results = yolo_model(frame_resized, verbose=False)[0]
+                best_obj_area = 0
+                best_obj_class = -1
+                
+                for box in results.boxes:
+                    cls_id = int(box.cls[0].item())
+                    if cls_id != 0:  # ข้ามคลาส 0 (Person/คน)
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        area = (x2 - x1) * (y2 - y1)
+                        if area > best_obj_area:
+                            best_obj_area = area
+                            best_obj_class = cls_id
+                
+                obj_areas.append(best_obj_area)
+                
+                # 💡 ปรับเกณฑ์การตัดตกตามชนิดสินค้าที่ YOLO เจอ
+                if best_obj_class in SMALL_OBJ: thresh = 2.5
+                elif best_obj_class in MEDIUM_OBJ: thresh = 1.0
+                elif best_obj_class in LARGE_OBJ: thresh = 0.3
+                else: thresh = 1.5 
+                
+                dynamic_thresholds.append(thresh)
+                    
         count += 1
     cap.release()
-    return frames, skin_areas, obj_areas
+    return frames, skin_areas, obj_areas, dynamic_thresholds
 
-# ==========================================
-# 3. เครื่องยนต์วิเคราะห์เสียงขั้นสูง
-# ==========================================
 def analyze_audio_strict(video_path):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_aud:
         audio_path = tmp_aud.name
@@ -162,9 +167,6 @@ def analyze_audio_strict(video_path):
             
     return audio_penalty, audio_msgs
 
-# ==========================================
-# 4. ระบบประมวลผลหลักและ UI
-# ==========================================
 uploaded_files = st.file_uploader(
     "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - สามารถลากวางพร้อมกันได้หลายไฟล์", 
     type=["mp4", "mov", "avi"], accept_multiple_files=True
@@ -173,13 +175,13 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Ultimate Quality Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (YOLO Quality Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
         results_summary = []
         cols = st.columns(3)
-        REJECT_THRESHOLD = 70.0 # 💡 ตัดตกที่ 70%
+        REJECT_THRESHOLD = 70.0 
         progress_bar = st.progress(0)
         
         for idx, uploaded_file in enumerate(uploaded_files):
@@ -200,8 +202,8 @@ if uploaded_files:
                     final_score = 0.0
                     
                     try:
-                        with st.spinner("กำลังวิเคราะห์สัดส่วนและความนิ่ง..."):
-                            frames, skin_areas, obj_areas = process_video_advanced(video_path, target_fps=6)
+                        with st.spinner("วิเคราะห์ AI & โครงสร้างสินค้า..."):
+                            frames, skin_areas, obj_areas, dynamic_thresholds = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย ไม่สามารถอ่านได้")
@@ -212,45 +214,36 @@ if uploaded_files:
                                 for frame_np in frames:
                                     pil_img = Image.fromarray(frame_np)
                                     input_tensor = transform(pil_img).unsqueeze(0).to(device)
-                                    output = model(input_tensor)
+                                    output = vision_model(input_tensor)
                                     frame_scores.append(torch.softmax(output, dim=1)[0][1].item())
                             
                             dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
                             visual_penalty = 0.0
                             details_list = []
                             
-                            # ==========================================
-                            # 💡 กฎที่ 1: สัดส่วนมือต่อสินค้า (Hand-to-Object Ratio)
-                            # ปรับเกณฑ์เป็น 0.75 เพื่อให้ไม้ม็อบ, ผ้าม่าน, และโหลกาแฟผ่านได้สบายๆ
-                            # ==========================================
+                            # 💡 กฎที่ 1: ตรวจสอบสเกลมือและสินค้าแบบอิงตามชนิดสินค้าจริง (Dynamic Threshold)
                             miniature_frames = 0
-                            for s_area, o_area in zip(skin_areas, obj_areas):
+                            for s_area, o_area, thresh in zip(skin_areas, obj_areas, dynamic_thresholds):
                                 if s_area > 500 and o_area > 500:
-                                    if (s_area / o_area) > 0.85: # 💡 แก้จาก 0.45 เป็น 0.75
+                                    if (s_area / o_area) > thresh: 
                                         miniature_frames += 1
                                         
                             if miniature_frames >= 3:
                                 visual_penalty += 85.0 
-                                details_list.append("⛔ สเกลสินค้าหลอกตา/ของจิ๋ว (มือบังมิดสินค้าเกิน 85%)")
+                                details_list.append("⛔ สเกลหลอกตา (สัดส่วนมือไม่สอดคล้องกับขนาดจริงของสินค้า)")
                             
-                            # ==========================================
                             # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Stability)
-                            # ปรับความยืดหยุ่นให้กับการซูมเข้าซูมออก
-                            # ==========================================
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
-                                # อนุญาตให้พื้นที่ยืดหยุ่นได้ถึง 50% (รองรับการขยับกล้องซูมเข้าใกล้ๆ)
-                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.50)
+                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.65) 
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
                                 
-                                if stability_percent <= 60.0:
+                                if stability_percent <= 50.0: 
                                     visual_penalty += 65.0
-                                    details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (สเกลคงที่ <60%)")
+                                    details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหดผิดปกติ")
                             
-                            # ==========================================
-                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง 2 วินาที (Melting Rule)
-                            # ==========================================
+                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง 2 วินาที
                             severe_streak = 0
                             max_severe_streak = 0
                             for s in frame_scores:
@@ -267,18 +260,15 @@ if uploaded_files:
                                 visual_penalty += 12.0
                                 details_list.append("ภาพบิดเบี้ยวช่วงสั้น ~1 วิ (อนุโลม)")
                                 
-                            # ==========================================
                             # 💡 กฎที่ 4: วิเคราะห์เสียง
-                            # ==========================================
                             audio_penalty, audio_msgs = analyze_audio_strict(video_path)
                             if audio_msgs: details_list.extend(audio_msgs)
                             
-                            # สรุปคะแนนสุทธิ
                             raw_final = 2.0 + dynamic_base + visual_penalty + audio_penalty
                             final_score = min(100.0, max(1.0, raw_final))
                             
                             if not details_list:
-                                details = "✅ สมบูรณ์: สเกลถูกต้อง ภาพสมูท เสียงชัดเจน"
+                                details = "✅ สมบูรณ์: สเกลและภาพสอดคล้อง เสียงชัดเจน"
                             else:
                                 details = " | ".join(list(dict.fromkeys(details_list)))
                             
@@ -294,7 +284,7 @@ if uploaded_files:
                             st.progress(int(final_score))
                                 
                     except Exception as e:
-                        st.caption(f"⚠️ Error เกิดข้อผิดพลาดทางระบบ: {str(e)}")
+                        st.caption(f"⚠️ Error: {str(e)}")
                     finally:
                         if os.path.exists(video_path): os.unlink(video_path)
                         if 'frames' in locals(): del frames
@@ -305,8 +295,7 @@ if uploaded_files:
                             torch.cuda.empty_cache()
                             torch.cuda.ipc_collect()
                             
-                        # หน่วงเวลา 2 วินาที
-                        time.sleep(2)
+                        time.sleep(1.0)
                     
                     results_summary.append({
                         "ลำดับ": idx + 1,
@@ -318,9 +307,6 @@ if uploaded_files:
             
             progress_bar.progress((idx + 1) / len(uploaded_files))
         
-        # ==========================================
-        # 5. แดชบอร์ดสรุปผลแบบตาราง
-        # ==========================================
         st.divider()
         st.subheader("📋 แดชบอร์ดสรุปผลการตรวจสอบ")
         df_all = pd.DataFrame(results_summary)
@@ -342,5 +328,3 @@ if uploaded_files:
             if not df_all[df_all['สถานะ'] == 'REJECT'].empty:
                 st.dataframe(df_all[df_all['สถานะ'] == 'REJECT'][["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
             else: st.info("ไม่มีคลิปที่ถูกปัดตก")
-        
-        st.success("🎉 ประมวลผลเสร็จสิ้น ระบบได้เคลียร์ Cache และ RAM อย่างสมบูรณ์แล้ว")
