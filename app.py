@@ -14,6 +14,11 @@ from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
 
+# 💡 เร่งความเร็วระดับลึก: เปิดใช้งาน Multi-threading และปิดโหมดกินทรัพยากร
+cv2.setNumThreads(4)
+torch.set_num_threads(4)
+torch.set_grad_enabled(False) # ปิดการคำนวณเบื้องหลังของ AI ทำให้สแกนเร็วขึ้นและประหยัด RAM
+
 # ล็อกค่า Seed ให้การคำนวณของ AI นิ่ง 100% ในทุกๆ รอบ
 torch.manual_seed(42)
 np.random.seed(42)
@@ -22,14 +27,15 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Strict + Presenter Mode 70%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Balanced Scoring 71%)")
 st.markdown("""
-**เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
-*   ⚡ **Turbo Batch:** ประมวลผลภาพมัดรวม เร็วขึ้น 3-5 เท่า
-*   🛍️ **Presenter Mode:** อนุโลมการใช้สองมือถือสินค้า (เช่น ถุงอาหารสัตว์) ให้ผ่านสเกลได้ง่ายขึ้น
+**เกณฑ์ตัดสิน: ความเสี่ยง ≥ 71% คือ ไม่ผ่าน (REJECT)**
+*   ⚡ **Ultra-Fast Batch:** สแกนเร็วขึ้นด้วย Multi-threading 
+*   ⚖️ **Balanced Scoring:** คลิปดีผ่านฉลุย / คลิปมีตำหนิเล็กน้อยหักคะแนนตามส่วน / คลิปพังจริงปัดตกทันที
+*   🛍️ **Presenter Mode:** อนุโลมการใช้สองมือถือสินค้าไซส์ใหญ่ (เช่น ถุงอาหารสัตว์) 
 *   📦 **Dynamic Stability:** อนุโลมรอยยับ การแกว่ง และการสะท้อนแสงของแพ็กเกจจิ้ง
 *   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
-*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
+*   👂 **Audio Strict:** ตัดตกเสียงหุ่นยนต์แบนราบ 100% หรืออ่านสะดุดพังหนัก
 """)
 
 @st.cache_resource
@@ -48,7 +54,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์วิเคราะห์สเกลและรูปทรง (ดั้งเดิม เสถียรสุด)
+# 2. เครื่องยนต์วิเคราะห์สเกลและรูปทรง (เสถียรสุด ไม่ค้าง)
 # ==========================================
 def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -110,7 +116,8 @@ def analyze_audio_strict(video_path):
     
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        cmd = [ffmpeg_exe, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path]
+        # 💡 เพิ่มคำสั่ง -threads ให้ ffmpeg ดึงเสียงออกได้ไวขึ้น
+        cmd = [ffmpeg_exe, "-y", "-threads", "4", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
@@ -131,12 +138,13 @@ def analyze_audio_strict(video_path):
             
             stutter_points = np.sum(energy_diffs > (mean_diff + 3.5 * std_diff))
             
+            # 💡 ปรับสมดุลคะแนน: พังชัดเจน = ปัดตกทันที (71) | พังนิดหน่อย = เตือน (15)
             if stutter_points > 3:
-                audio_penalty += 68.0 
-                audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
+                audio_penalty += 71.0 
+                audio_msgs.append("⛔ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
             elif stutter_points >= 2:
                 audio_penalty += 15.0 
-                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1-2 คำ (อนุโลม)")
+                audio_msgs.append("⚠️ เสียงสะดุดเล็กน้อย 1-2 คำ (หักคะแนนบางส่วน)")
 
         window_large = int(sample_rate * 0.2)
         energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
@@ -146,11 +154,11 @@ def analyze_audio_strict(video_path):
             variance_e = np.var(energies_large) / (mean_e + 1e-6)
             
             if variance_e < 0.08 and mean_e > 100:
-                audio_penalty += 65.0
-                audio_msgs.append("⚠️ เสียงแบนราบเป็นหุ่นยนต์/ฟังไม่รู้ภาษา")
+                audio_penalty += 71.0
+                audio_msgs.append("⛔ เสียงแบนราบเป็นหุ่นยนต์/ฟังไม่รู้ภาษา")
             elif variance_e < 0.25 and mean_e > 100:
-                audio_penalty += 8.0
-                if not audio_msgs: audio_msgs.append("🔊 เสียงพูดคล้าย AI (ผ่าน)")
+                audio_penalty += 15.0
+                if not audio_msgs: audio_msgs.append("⚠️ เสียงพูดคล้าย AI (หักคะแนนบางส่วน)")
     except Exception:
         return 0.0, ["⚠️ ระบบไม่สามารถวิเคราะห์คลื่นเสียงได้"]
     finally:
@@ -162,25 +170,25 @@ def analyze_audio_strict(video_path):
 # 4. ระบบประมวลผลหลัก
 # ==========================================
 uploaded_files = st.file_uploader(
-    "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - สามารถลากวางพร้อมกันได้หลายไฟล์ (จำกัดไม่เกิน 50 คลิป/รอบ)", 
+    "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - ลากวางพร้อมกันได้สูงสุด 50 คลิป", 
     type=["mp4", "mov", "avi"], accept_multiple_files=True
 )
 
 if uploaded_files:
     if len(uploaded_files) > 50:
-        st.error(f"⚠️ ตรวจพบไฟล์ {len(uploaded_files)} คลิป! เซิร์ฟเวอร์ฟรีไม่สามารถรองรับรวดเดียวเกิน 50 ไฟล์ได้")
+        st.error(f"⚠️ ตรวจพบไฟล์ {len(uploaded_files)} คลิป! เซิร์ฟเวอร์ฟรีรองรับรวดเดียวสูงสุด 50 ไฟล์")
         st.warning("👉 วิธีแก้: กากบาท (X) ลบไฟล์ออกให้เหลือไม่เกิน 50 คลิป แล้วทำต่อได้ทันที")
         st.stop()
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Strict Batch Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Balanced Quality Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
         results_summary = []
         cols = st.columns(3)
-        REJECT_THRESHOLD = 70.0 
+        REJECT_THRESHOLD = 71.0 # 💡 ปรับเกณฑ์ตัดตกเป็น 71.0 ตามคำขอ
         progress_bar = st.progress(0)
         
         for idx, uploaded_file in enumerate(uploaded_files):
@@ -210,14 +218,14 @@ if uploaded_files:
                                 
                             frame_scores = []
                             batch_size = 16 
-                            with torch.no_grad():
-                                for i in range(0, len(frames), batch_size):
-                                    batch_frames = frames[i:i+batch_size]
-                                    tensors = [transform(Image.fromarray(f)) for f in batch_frames]
-                                    input_batch = torch.stack(tensors).to(device)
-                                    output = model(input_batch)
-                                    scores = torch.softmax(output, dim=1)[:, 1].tolist()
-                                    frame_scores.extend(scores)
+                            
+                            for i in range(0, len(frames), batch_size):
+                                batch_frames = frames[i:i+batch_size]
+                                tensors = [transform(Image.fromarray(f)) for f in batch_frames]
+                                input_batch = torch.stack(tensors).to(device)
+                                output = model(input_batch)
+                                scores = torch.softmax(output, dim=1)[:, 1].tolist()
+                                frame_scores.extend(scores)
                             
                             dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
                             visual_penalty = 0.0
@@ -229,15 +237,14 @@ if uploaded_files:
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 500 and o_area > 500:
-                                    # 💡 แก้ไข: ถ้าของชิ้นกลาง-ใหญ่ (เกิน 5000 พิกเซล) อนุญาตให้มือใหญ่กว่าได้ถึง 2.5 เท่า (รองรับถือ 2 มือ)
-                                    # ถ้าของชิ้นเล็ก บังคับที่ 1.5 เท่า
+                                    # ของชิ้นกลาง-ใหญ่ อนุญาตมือใหญ่กว่า 2.5 เท่า / ของชิ้นเล็กบังคับ 1.5 เท่า
                                     limit_ratio = 2.5 if o_area > 5000 else 1.5
                                     if (s_area / o_area) > limit_ratio: 
                                         miniature_frames += 1
                                         
                             if miniature_frames >= 3:
-                                visual_penalty += 85.0 
-                                details_list.append("⛔ สเกลสินค้าหลอกตา (สัดส่วนมือใหญ่ผิดปกติ)")
+                                visual_penalty += 45.0 # 💡 มีตำหนิ = หักคะแนน 45 (ถ้าโดนข้อเดียวจะรอด แต่ถ้าโดนข้ออื่นด้วยจะร่วง)
+                                details_list.append("⚠️ สเกลสินค้าหลอกตา (สัดส่วนมือใหญ่เกินจริง)")
                             
                             # ==========================================
                             # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Stability for Bags)
@@ -247,7 +254,6 @@ if uploaded_files:
                                 median_obj = np.median(valid_obj)
                                 is_held_product = median_obj > 5000
                                 
-                                # 💡 แก้ไข: อนุโลมของชิ้นใหญ่ (เช่น ถุงอาหาร) ให้ผ่านเกณฑ์ความนิ่งที่ 30% และยืดหยุ่นพื้นที่ถึง 85%
                                 pass_percent = 30.0 if is_held_product else 50.0
                                 tolerance = 0.85 if is_held_product else 0.50
                                 
@@ -255,8 +261,8 @@ if uploaded_files:
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
                                 
                                 if stability_percent <= pass_percent:
-                                    visual_penalty += 65.0
-                                    details_list.append(f"⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (สเกลคงที่ <{int(pass_percent)}%)")
+                                    visual_penalty += 45.0 # 💡 มีตำหนิ = หักคะแนน 45 
+                                    details_list.append(f"⚠️ โครงสร้างสินค้ายืดหดไม่นิ่ง (ความนิ่ง {int(stability_percent)}%)")
                             
                             # ==========================================
                             # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt)
@@ -271,16 +277,17 @@ if uploaded_files:
                                     severe_streak = 0
                                     
                             if max_severe_streak >= 12:
-                                visual_penalty += 68.0 
+                                visual_penalty += 71.0 # 💡 พังชัดเจน = ปัดตกทันที
                                 details_list.append("⛔ ภาพละลาย/อวัยวะบิดเบี้ยวต่อเนื่องเกิน 2 วินาที")
                             elif max_severe_streak >= 5: 
-                                visual_penalty += 12.0
-                                details_list.append("ภาพบิดเบี้ยวช่วงสั้น ~1 วิ (อนุโลม)")
+                                visual_penalty += 15.0 # 💡 พังนิดหน่อย = หักเตือน
+                                details_list.append("⚠️ ภาพบิดเบี้ยวช่วงสั้น ~1 วิ (หักคะแนนบางส่วน)")
                                 
-                            # กฎที่ 4: เสียง
+                            # กฎที่ 4: เสียง (ดึงคะแนนบวกเพิ่มมาจากด้านบน)
                             audio_penalty, audio_msgs = analyze_audio_strict(video_path)
                             if audio_msgs: details_list.extend(audio_msgs)
                             
+                            # สรุปคะแนนสุทธิ
                             raw_final = 2.0 + dynamic_base + visual_penalty + audio_penalty
                             final_score = min(100.0, max(1.0, raw_final))
                             
@@ -329,8 +336,8 @@ if uploaded_files:
         df_all = pd.DataFrame(results_summary)
         m1, m2, m3 = st.columns(3)
         m1.metric("จำนวนคลิปทั้งหมด", f"{len(df_all)} คลิป")
-        m2.metric("✅ ผ่าน (< 70%)", f"{len(df_all[df_all['สถานะ'] == 'PASS'])} คลิป")
-        m3.metric("❌ ไม่ผ่าน (≥ 70%)", f"{len(df_all[df_all['สถานะ'] == 'REJECT'])} คลิป")
+        m2.metric("✅ ผ่าน (< 71%)", f"{len(df_all[df_all['สถานะ'] == 'PASS'])} คลิป")
+        m3.metric("❌ ไม่ผ่าน (≥ 71%)", f"{len(df_all[df_all['สถานะ'] == 'REJECT'])} คลิป")
         
         st.write("---")
         tab1, tab2 = st.tabs(["✅ คลิปที่ผ่าน", "❌ คลิปที่ไม่ผ่าน"])
