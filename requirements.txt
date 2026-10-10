@@ -2,3 +2,4 @@ streamlit
 timm
 imageio-ffmpeg
 scipy
+opencv-python-headless
