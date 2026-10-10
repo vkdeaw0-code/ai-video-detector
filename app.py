@@ -17,8 +17,8 @@ from torchvision import transforms
 # 1. ตั้งค่าหน้าเว็บ Streamlit และโหลดโมเดล
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Pro", page_icon="🎬", layout="wide")
-st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (โหมดยืดหยุ่นพิเศษ)")
-st.write("ระบบตรวจจับเฉพาะจุดพังร้ายแรง: **เกณฑ์ตัดตก 76% ขึ้นไป** | อนุโลมจุดบกพร่องสั้นๆ (1-3 วิ) | ตัดตกเฉพาะมือ/อวัยวะ/สินค้าพังเกิน **3 วินาทีขึ้นไป** หรือเสียงพูดฟังไม่รู้เรื่อง")
+st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (เวอร์ชันเข้มงวดสัดส่วนสมดุล)")
+st.write("ระบบตรวจจับคุณภาพคน สินค้า และเสียงภาษาไทย: **เกณฑ์ตัดตก 76% ขึ้นไป** | พลาดเกิน 2 วินาที หรือเสียงเพี้ยนเกิน 2 คำ = หักคะแนนหนักตัดตก | คะแนน % คำนวณตามความละเอียดจริงของคลิป")
 
 @st.cache_resource
 def load_detection_models():
@@ -61,7 +61,7 @@ def extract_frames(video_path, target_fps=6):
     return frames
 
 # ==========================================
-# 3. ฟังก์ชันวิเคราะห์เสียงพูด (ไทย / อังกฤษ)
+# 3. ฟังก์ชันวิเคราะห์เสียงพูดภาษาไทย/อังกฤษ
 # ==========================================
 def analyze_audio_quality(video_path):
     audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
@@ -92,13 +92,16 @@ def analyze_audio_quality(video_path):
             mean_energy = np.mean(energies)
             energy_variance = np.var(energies) / (mean_energy + 1e-6)
             
-            # ตัดตกเฉพาะเสียงแบนราบเป็นหุ่นยนต์ฟังไม่เป็นภาษาไทย/อังกฤษอย่างรุนแรง
-            if energy_variance < 0.10 and mean_energy > 100: 
-                audio_penalty += 72.0 # ตัดตกทันที
-                audio_msg = "🔊 เสียงพูดเพี้ยนมาก/ฟังไม่รู้ภาษา (ตัดตก)"
-            elif energy_variance < 0.25 and mean_energy > 100:
-                audio_penalty += 10.0 # เสียงสังเคราะห์เล็กน้อยแต่ฟังออก (อนุโลมให้ผ่าน)
-                audio_msg = "🔊 มีเสียงสังเคราะห์แต่ฟังรู้เรื่อง (อนุโลมผ่าน)"
+            # ตรวจสอบการเพี้ยนของเสียงภาษาไทย/อังกฤษ
+            if energy_variance < 0.12 and mean_energy > 100: 
+                audio_penalty += 60.0 # เพี้ยนรุนแรงเกิน 2 คำฟังไม่รู้เรื่อง (ดันให้เสี่ยงตก)
+                audio_msg = "🔊 เสียงพูดเพี้ยนเกิน 2 คำ/ฟังไม่รู้ภาษา (ตัดตก)"
+            elif energy_variance < 0.22 and mean_energy > 100:
+                audio_penalty += 25.0 # เพี้ยนประมาณ 1-2 คำพอเดาคำได้
+                audio_msg = "🔊 เสียงพูดเพี้ยน 1-2 คำ (อนุโลมผ่าน)"
+            elif energy_variance < 0.32 and mean_energy > 100:
+                audio_penalty += 10.0 # เสียงสังเคราะห์เล็กน้อยแต่ชัดเจน
+                audio_msg = "🔊 เสียงสังเคราะห์แต่ฟังชัดเจน (อนุโลมผ่าน)"
         
     except Exception:
         return 0.0, "⚠️ ไม่สามารถวิเคราะห์เสียงได้"
@@ -134,12 +137,11 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    final_score = 5.0 # คะแนนฐานเริ่มต้นที่ 5%
                     status = "ERROR"
                     details = ""
                     
                     try:
-                        with st.spinner("กำลังสแกนโครงสร้างภาพและเสียง..."):
+                        with st.spinner("กำลังสแกนวิเคราะห์รายละเอียดเฟรม..."):
                             frames = extract_frames(video_path, target_fps=6)
                             
                             if not frames:
@@ -154,40 +156,52 @@ if uploaded_files:
                                         probs = torch.softmax(output, dim=1)
                                         frame_scores.append(probs[0][1].item())
                                 
+                                # 💡 1. คำนวณ Base Risk จากสถิติจริงของทุกเฟรม (ทำให้ % แต่ละคลิปกระจายตัวไม่เท่ากัน)
+                                mean_prob = float(np.mean(frame_scores))
+                                std_prob = float(np.std(frame_scores))
+                                dynamic_base_score = (mean_prob * 20.0) + (std_prob * 15.0)
+                                
                                 visual_penalty = 0.0
                                 details_list = []
                                 
                                 severe_streak = 0
                                 max_severe_streak = 0
+                                total_bad_frames = 0
                                 
                                 for s in frame_scores:
-                                    if s > 0.985: # สแกนจุดผิดปกติความมั่นใจสูง
+                                    if s > 0.98: # สแกนหาเฟรมที่มีความบิดเบี้ยวของคนหรือสินค้าชัดเจน
                                         severe_streak += 1
                                         max_severe_streak = max(max_severe_streak, severe_streak)
+                                        total_bad_frames += 1
                                     else:
                                         severe_streak = 0
                                         
-                                # 💡 กฎใหม่: 18 เฟรมที่ 6 FPS = 3 วินาทีเต็ม
-                                if max_severe_streak >= 18: 
-                                    visual_penalty += 72.0 # พังค้างเกิน 3 วินาทีเต็ม (ตัดตก >= 76%)
-                                    details_list.append("⚠️ มือ/ขา/อวัยวะ หรือสินค้า บิดเบี้ยวพังเกิน 3 วินาที")
-                                elif max_severe_streak >= 6: 
-                                    visual_penalty += 15.0 # พังช่วง 1-3 วินาที (อนุโลมผ่าน ได้คะแนนเสี่ยงแค่ ~20-30%)
-                                    details_list.append("อวัยวะ/สินค้าบิดเบี้ยวเล็กน้อย 1-3 วิ (อนุโลมให้ผ่าน)")
-                                elif max_severe_streak >= 2:
-                                    visual_penalty += 5.0 # แวบเดียวไม่ถึง 1 วิ (ผ่านสบาย)
-                                    details_list.append("ภาพกระตุก/ละลายเล็กน้อย ไม่ถึง 1 วิ (อนุโลมให้ผ่าน)")
+                                # เพิ่มน้ำหนักจากสัดส่วนเฟรมเสียในคลิป
+                                bad_ratio = total_bad_frames / len(frame_scores) if len(frame_scores) > 0 else 0
+                                ratio_penalty = bad_ratio * 25.0
                                 
-                                # ตรวจสอบเสียง
+                                # 💡 2. กฎความเข้มงวด 2 วินาที (12 เฟรมที่ 6 FPS = 2 วินาที)
+                                if max_severe_streak >= 12: 
+                                    visual_penalty += 65.0 # พังค้างเกิน 2 วินาทีเต็ม (ตัดตก >= 76%)
+                                    details_list.append("⚠️ มือ/ขา/คน หรือสินค้า บิดเบี้ยวพังเกิน 2 วินาที")
+                                elif max_severe_streak >= 6: 
+                                    visual_penalty += 30.0 # พังช่วง 1-2 วินาที (เพิ่มความเสี่ยงชัดเจน)
+                                    details_list.append("อวัยวะ/สินค้าบิดเบี้ยวช่วงสั้น 1-2 วิ")
+                                elif max_severe_streak >= 2:
+                                    visual_penalty += 10.0 # กระตุกแวบเดียวไม่ถึง 1 วิ
+                                    details_list.append("ภาพกระตุกเล็กน้อยไม่ถึง 1 วิ (อนุโลม)")
+                                
+                                # 3. ตรวจสอบเสียงภาษาไทย
                                 audio_penalty, audio_msg = analyze_audio_quality(video_path)
                                 if audio_msg and audio_msg != "🔊 เสียงพูดชัดเจนเป็นธรรมชาติ":
                                     details_list.append(audio_msg)
                                 
-                                # คำนวณคะแนนรวมสุทธิ (1 - 100%)
-                                final_score = min(100.0, max(1.0, final_score + visual_penalty + audio_penalty))
+                                # 4. คำนวณคะแนนรวมสุทธิแบบกระจายตัวสมดุล (1 - 100%)
+                                raw_final = 3.0 + dynamic_base_score + ratio_penalty + visual_penalty + audio_penalty
+                                final_score = min(100.0, max(1.0, raw_final))
                                 
                                 if not details_list:
-                                    details = "คลิปภาพสวยเนียน การเคลื่อนไหวและเสียงเป็นธรรมชาติ"
+                                    details = "รูปทรงคนและสินค้าสมบูรณ์ เสียงภาษาไทยชัดเจนดี"
                                 else:
                                     details = " | ".join(list(dict.fromkeys(details_list)))
                                 
