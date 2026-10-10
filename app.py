@@ -13,32 +13,30 @@ import time
 from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
-from ultralytics import YOLO  # 💡 นำเข้าโมเดลแยกประเภทสินค้า
+from ultralytics import YOLO
 
+# ล็อกค่า Seed ให้การคำนวณของ AI นิ่ง 100% ในทุกๆ รอบ
 torch.manual_seed(42)
 np.random.seed(42)
 
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (YOLO Dynamic Scale)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Hybrid Vision - 70%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
-*   📏 **Smart Proportion:** ใช้ AI (YOLO) จับประเภทสินค้าและปรับเกณฑ์สัดส่วนมืออัตโนมัติตามชนิดสินค้า
-*   📦 **Scale Stability:** อนุโลมการขยับพลิกสินค้า แต่โครงสร้างหลักต้องไม่ยืดหดกลายร่าง 
+*   📏 **Smart Hybrid Proportion:** ใช้ YOLO ผสม Center Contour รองรับสินค้าทุกประเภท (รวมถึงถุงอาหารสัตว์ที่ไม่มีในฐานข้อมูล)
+*   📦 **Scale Stability:** อนุโลมการขยับ พลิก แกว่ง หรือถือสินค้าสองมือได้อย่างอิสระ 
 *   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน 2 วินาที
-*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์ หรืออ่านสะดุดเกิน 2 คำ
+*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์ หรืออ่านสะดุด/เพี้ยนหนัก
 """)
 
 @st.cache_resource
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # โมเดลจับความผิดปกติของภาพ
     vision_model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     vision_model = vision_model.to(device)
     vision_model.eval()
     
-    # 💡 โมเดล YOLOv8 สำหรับแยกประเภทและตรวจจับกล่องสินค้า
     yolo_model = YOLO('yolov8n.pt') 
-    
     return vision_model, yolo_model, device
 
 vision_model, yolo_model, device = load_models()
@@ -48,10 +46,9 @@ transform = transforms.Compose([
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# หมวดหมู่สินค้าตาม COCO Dataset
-SMALL_OBJ = [39, 41, 42, 43, 44, 45, 63, 64, 65, 67, 73, 76, 79] # ขวด, แก้ว, คีย์บอร์ด, หนังสือ ฯลฯ
-MEDIUM_OBJ = [24, 25, 26, 27, 28, 32, 68, 74] # กระเป๋า, ร่ม, ไมโครเวฟ, นาฬิกา ฯลฯ
-LARGE_OBJ = [56, 57, 58, 59, 60, 62, 70, 71, 72] # เก้าอี้, โซฟา, เตียง, ทีวี, ตู้เย็น ฯลฯ
+SMALL_OBJ = [39, 41, 42, 43, 44, 45, 63, 64, 65, 67, 73, 76, 79] 
+MEDIUM_OBJ = [24, 25, 26, 27, 28, 32, 68, 74] 
+LARGE_OBJ = [56, 57, 58, 59, 60, 62, 70, 71, 72] 
 
 def process_video_advanced(video_path, target_fps=6):
     cap = cv2.VideoCapture(video_path)
@@ -75,34 +72,53 @@ def process_video_advanced(video_path, target_fps=6):
                 frame_resized = cv2.resize(frame, (224, 224))
                 frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
                 
-                # จับพื้นที่ผิว/มือ
+                # --- 1. จับพื้นที่ผิว/มือ ---
                 hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
                 skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
                 skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]) if skin_cnts else 0)
                 
-                # 💡 ใช้ YOLO ค้นหาสินค้าหลักในเฟรม (ไม่ยึดติดแค่ตรงกลาง)
+                # --- 2. จับสินค้าด้วย Center Contour (สำหรับของที่ YOLO ไม่รู้จัก เช่น ถุงอาหาร) ---
+                gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+                blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+                edges = cv2.Canny(blurred, 40, 120)
+                h, w = edges.shape
+                mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.rectangle(mask, (int(w*0.15), int(h*0.15)), (int(w*0.85), int(h*0.95)), 255, -1)
+                focused_edges = cv2.bitwise_and(edges, edges, mask=mask)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+                closed_edges = cv2.morphologyEx(focused_edges, cv2.MORPH_CLOSE, kernel)
+                contour_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contour_obj_area = max([cv2.contourArea(c) for c in contour_cnts]) if contour_cnts else 0
+
+                # --- 3. จับสินค้าด้วย YOLO ---
                 results = yolo_model(frame_resized, verbose=False)[0]
-                best_obj_area = 0
+                yolo_obj_area = 0
                 best_obj_class = -1
                 
                 for box in results.boxes:
                     cls_id = int(box.cls[0].item())
-                    if cls_id != 0:  # ข้ามคลาส 0 (Person/คน)
+                    if cls_id != 0:  
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         area = (x2 - x1) * (y2 - y1)
-                        if area > best_obj_area:
-                            best_obj_area = area
+                        if area > yolo_obj_area:
+                            yolo_obj_area = area
                             best_obj_class = cls_id
                 
-                obj_areas.append(best_obj_area)
+                # 💡 HYBRID LOGIC: ใช้พื้นที่ที่ใหญ่ที่สุด (กันพลาด YOLO ไปจับของบนชั้นวางด้านหลัง)
+                final_obj_area = max(contour_obj_area, yolo_obj_area)
+                obj_areas.append(final_obj_area)
                 
-                # 💡 ปรับเกณฑ์การตัดตกตามชนิดสินค้าที่ YOLO เจอ
-                if best_obj_class in SMALL_OBJ: thresh = 2.5
-                elif best_obj_class in MEDIUM_OBJ: thresh = 1.0
-                elif best_obj_class in LARGE_OBJ: thresh = 0.3
-                else: thresh = 1.5 
-                
+                # ปรับ Threshold ให้เข้ากับสถานการณ์
+                if final_obj_area == yolo_obj_area and best_obj_class != -1:
+                    if best_obj_class in SMALL_OBJ: thresh = 2.5
+                    elif best_obj_class in MEDIUM_OBJ: thresh = 1.0
+                    elif best_obj_class in LARGE_OBJ: thresh = 0.3
+                    else: thresh = 1.5 
+                else:
+                    # ถ้าระบบใช้ Contour จับของชิ้นใหญ่ตรงกลาง (เช่น ถุงอาหารหมาแมว) อนุโลมมือใหญ่ได้ 2 เท่า
+                    thresh = 2.0 
+                    
                 dynamic_thresholds.append(thresh)
                     
         count += 1
@@ -137,14 +153,15 @@ def analyze_audio_strict(video_path):
             mean_diff = np.mean(energy_diffs)
             std_diff = np.std(energy_diffs)
             
-            stutter_points = np.sum(energy_diffs > (mean_diff + 3.5 * std_diff))
+            # 💡 เพิ่มความยืดหยุ่นให้เสียงพากย์ที่มีเอนเนอจี้สูง (จาก 3.5 เป็น 4.0)
+            stutter_points = np.sum(energy_diffs > (mean_diff + 4.0 * std_diff))
             
-            if stutter_points > 3:
+            if stutter_points > 4:
                 audio_penalty += 68.0 
-                audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
-            elif stutter_points >= 2:
+                audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัว")
+            elif stutter_points >= 3:
                 audio_penalty += 15.0 
-                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1-2 คำ (อนุโลม)")
+                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย (อนุโลม)")
 
         window_large = int(sample_rate * 0.2)
         energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
@@ -175,7 +192,7 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (YOLO Quality Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Hybrid Quality Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -221,7 +238,7 @@ if uploaded_files:
                             visual_penalty = 0.0
                             details_list = []
                             
-                            # 💡 กฎที่ 1: ตรวจสอบสเกลมือและสินค้าแบบอิงตามชนิดสินค้าจริง (Dynamic Threshold)
+                            # 💡 กฎที่ 1: ตรวจสอบสเกลด้วย Hybrid Threshold
                             miniature_frames = 0
                             for s_area, o_area, thresh in zip(skin_areas, obj_areas, dynamic_thresholds):
                                 if s_area > 500 and o_area > 500:
@@ -232,14 +249,16 @@ if uploaded_files:
                                 visual_penalty += 85.0 
                                 details_list.append("⛔ สเกลหลอกตา (สัดส่วนมือไม่สอดคล้องกับขนาดจริงของสินค้า)")
                             
-                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Stability)
+                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Stability) ยืดหยุ่นสูงสุดรองรับการขยับ/ยกถุง
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
-                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.65) 
+                                # อนุญาตให้พื้นที่แกว่ง ยืดหยุ่นได้ถึง 80% (รองรับการยก แกว่ง ถือของชิ้นใหญ่)
+                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.80) 
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
                                 
-                                if stability_percent <= 50.0: 
+                                # เปอร์เซ็นความนิ่งเหลือแค่ 40% ก็ให้ผ่าน (เหมาะกับคลิปขยับเยอะๆ)
+                                if stability_percent <= 40.0: 
                                     visual_penalty += 65.0
                                     details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหดผิดปกติ")
                             
