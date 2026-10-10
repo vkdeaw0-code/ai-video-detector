@@ -13,55 +13,59 @@ import time
 from scipy.io import wavfile
 from PIL import Image
 from torchvision import transforms
-from ultralytics import YOLO
 
-# ล็อกค่า Seed
+# ล็อกค่า Seed ให้การคำนวณของ AI นิ่ง 100% ในทุกๆ รอบ
 torch.manual_seed(42)
 np.random.seed(42)
 
-st.set_page_config(page_title="AI Video Inspector (Turbo YOLO)", page_icon="⚡", layout="wide")
-st.title("⚡ ระบบคัดกรองคลิป AI (Turbo YOLO - Fast & Smart)")
+# ==========================================
+# 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
+# ==========================================
+st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Fast Contour - Smart 70%)")
 st.markdown("""
-**เวอร์ชันนี้ถูกรีดประสิทธิภาพให้ทำงานไวขึ้น 3-5 เท่า สำหรับประมวลผลหลายคลิป**
-* 📏 **Smart Proportion:** รองรับคลิปถือถุงอาหารสัตว์ (ผ่านง่ายขึ้น)
-* ⚡ **Turbo Mode:** เร่งความเร็ว YOLO และการดึงเฟรม
+**เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
+*   📏 **Proportion Logic:** รองรับการถือสินค้าขนาดใหญ่ (เช่น ถุงอาหารสัตว์) อนุโลมสัดส่วนมือได้กว้างขึ้น
+*   📦 **Scale Stability:** สเกลยืดหยุ่นรองรับการแกว่ง ยก และพลิกสินค้า 
+*   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
+*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
 """)
 
 @st.cache_resource
-def load_models():
+def load_vision_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vision_model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
-    vision_model = vision_model.to(device)
-    vision_model.eval()
-    
-    yolo_model = YOLO('yolov8n.pt') 
-    return vision_model, yolo_model, device
+    model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
+    model = model.to(device)
+    model.eval()
+    return model, device
 
-vision_model, yolo_model, device = load_models()
+model, device = load_vision_model()
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-SMALL_OBJ = [39, 41, 42, 43, 44, 45, 63, 64, 65, 67, 73, 76, 79] 
-MEDIUM_OBJ = [24, 25, 26, 27, 28, 32, 68, 74] 
-LARGE_OBJ = [56, 57, 58, 59, 60, 62, 70, 71, 72] 
-
-# 💡 เร่งความเร็ว: ลด FPS เหลือ 3 
-def process_video_advanced(video_path, target_fps=3):
+# ==========================================
+# 2. เครื่องยนต์วิเคราะห์สเกลและรูปทรง (ฉบับเร่งความเร็ว)
+# ==========================================
+def process_video_advanced(video_path, target_fps=6):
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0 or np.isnan(video_fps): video_fps = 30
     
     interval = max(1, int(round(video_fps / target_fps)))
-    frames, skin_areas, obj_areas, dynamic_thresholds = [], [], [], []
+    frames = []
+    
+    skin_areas = []
+    obj_areas = []
     
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     
     count = 0
     while cap.isOpened():
+        # 💡 ใช้ cap.grab() เพื่อเร่งความเร็ว ข้ามเฟรมที่ไม่จำเป็น
         ret = cap.grab()
         if not ret: break
         
@@ -71,59 +75,41 @@ def process_video_advanced(video_path, target_fps=3):
                 frame_resized = cv2.resize(frame, (224, 224))
                 frames.append(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
                 
+                # --- 2.1 จับพื้นที่มือ/อวัยวะ ---
                 hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
                 skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
                 skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 skin_areas.append(max([cv2.contourArea(c) for c in skin_cnts]) if skin_cnts else 0)
                 
-                # Hybrid Contour
+                # --- 2.2 จับพื้นที่สินค้าหลักตรงกลางจอ ---
                 gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
                 blurred = cv2.GaussianBlur(gray, (7, 7), 0)
                 edges = cv2.Canny(blurred, 40, 120)
+                
                 h, w = edges.shape
                 mask = np.zeros((h, w), dtype=np.uint8)
                 cv2.rectangle(mask, (int(w*0.15), int(h*0.15)), (int(w*0.85), int(h*0.95)), 255, -1)
                 focused_edges = cv2.bitwise_and(edges, edges, mask=mask)
+                
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
                 closed_edges = cv2.morphologyEx(focused_edges, cv2.MORPH_CLOSE, kernel)
-                contour_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                contour_obj_area = max([cv2.contourArea(c) for c in contour_cnts]) if contour_cnts else 0
-
-                # 💡 เร่งความเร็ว YOLO ขั้นสุด: บังคับย่อขนาดภาพ (imgsz=224) เบาเครื่องมหาศาล
-                results = yolo_model(frame_resized, imgsz=224, verbose=False)[0]
-                yolo_obj_area = 0
-                best_obj_class = -1
+                obj_cnts, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
-                for box in results.boxes:
-                    cls_id = int(box.cls[0].item())
-                    if cls_id != 0:  
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        area = (x2 - x1) * (y2 - y1)
-                        if area > yolo_obj_area:
-                            yolo_obj_area = area
-                            best_obj_class = cls_id
-                
-                final_obj_area = max(contour_obj_area, yolo_obj_area)
-                obj_areas.append(final_obj_area)
-                
-                if final_obj_area == yolo_obj_area and best_obj_class != -1:
-                    if best_obj_class in SMALL_OBJ: thresh = 2.5
-                    elif best_obj_class in MEDIUM_OBJ: thresh = 1.0
-                    elif best_obj_class in LARGE_OBJ: thresh = 0.3
-                    else: thresh = 1.5 
+                if obj_cnts:
+                    obj_areas.append(max([cv2.contourArea(c) for c in obj_cnts]))
                 else:
-                    thresh = 2.0 
-                    
-                dynamic_thresholds.append(thresh)
-                    
+                    obj_areas.append(0)
+                
         count += 1
     cap.release()
-    return frames, skin_areas, obj_areas, dynamic_thresholds
+    return frames, skin_areas, obj_areas
 
+# ==========================================
+# 3. เครื่องยนต์วิเคราะห์เสียงขั้นสูง
+# ==========================================
 def analyze_audio_strict(video_path):
     with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_aud:
         audio_path = tmp_aud.name
-
     audio_penalty = 0.0
     audio_msgs = []
     
@@ -139,6 +125,7 @@ def analyze_audio_strict(video_path):
         if len(data) == 0: return 0.0, ["🔇 ไม่มีเสียงพากย์ (อนุโลม)"]
             
         data_float = data.astype(np.float32)
+        
         window_size = int(sample_rate * 0.05)
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         
@@ -146,14 +133,15 @@ def analyze_audio_strict(video_path):
             energy_diffs = np.abs(np.diff(energies))
             mean_diff = np.mean(energy_diffs)
             std_diff = np.std(energy_diffs)
-            stutter_points = np.sum(energy_diffs > (mean_diff + 4.0 * std_diff))
             
-            if stutter_points > 4:
+            stutter_points = np.sum(energy_diffs > (mean_diff + 3.5 * std_diff))
+            
+            if stutter_points > 3:
                 audio_penalty += 68.0 
-                audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัว")
-            elif stutter_points >= 3:
+                audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
+            elif stutter_points >= 2:
                 audio_penalty += 15.0 
-                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย (อนุโลม)")
+                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1-2 คำ (อนุโลม)")
 
         window_large = int(sample_rate * 0.2)
         energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
@@ -161,13 +149,13 @@ def analyze_audio_strict(video_path):
         if len(energies_large) > 0:
             mean_e = np.mean(energies_large)
             variance_e = np.var(energies_large) / (mean_e + 1e-6)
+            
             if variance_e < 0.08 and mean_e > 100:
                 audio_penalty += 65.0
                 audio_msgs.append("⚠️ เสียงแบนราบเป็นหุ่นยนต์/ฟังไม่รู้ภาษา")
             elif variance_e < 0.25 and mean_e > 100:
                 audio_penalty += 8.0
                 if not audio_msgs: audio_msgs.append("🔊 เสียงพูดคล้าย AI แต่ฟังรู้เรื่อง (ผ่าน)")
-
     except Exception:
         return 0.0, ["⚠️ ระบบไม่สามารถวิเคราะห์คลื่นเสียงได้"]
     finally:
@@ -175,32 +163,37 @@ def analyze_audio_strict(video_path):
             
     return audio_penalty, audio_msgs
 
+# ==========================================
+# 4. ระบบประมวลผลหลักและ UI
+# ==========================================
 uploaded_files = st.file_uploader(
-    f"เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - สามารถลากวางพร้อมกันได้หลายไฟล์", 
+    "เลือกไฟล์วิดีโอ (.mp4, .mov, .avi) - สามารถลากวางพร้อมกันได้หลายไฟล์ (แนะนำไม่เกิน 20 คลิป/รอบ)", 
     type=["mp4", "mov", "avi"], accept_multiple_files=True
 )
 
 if uploaded_files:
-    # 💡 คำแนะนำสำหรับการใส่ไฟล์จำนวนมากๆ
+    # 💡 วาล์วนิรภัย: ดักจับจำนวนไฟล์ก่อนเครื่องจะค้าง
     if len(uploaded_files) > 20:
-        st.warning(f"⚠️ คุณกำลังอัปโหลด {len(uploaded_files)} คลิป! บนเว็บฟรีอาจทำให้ช้ามาก แนะนำให้แบ่งทำทีละ 10-20 คลิปครับ")
+        st.error(f"⚠️ ตรวจพบไฟล์ {len(uploaded_files)} คลิป! เซิร์ฟเวอร์ฟรีไม่สามารถรองรับรวดเดียวได้ ระบบอาจค้างหรือ Error")
+        st.warning("👉 วิธึแก้: กรุณากดเครื่องหมาย (X) ลบไฟล์ออกให้เหลือไม่เกิน 20 คลิป แล้วระบบจะทำงานต่อได้ทันทีครับ")
+        st.stop()
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกน (Turbo Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Smart Quality Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
         results_summary = []
         cols = st.columns(3)
-        REJECT_THRESHOLD = 70.0 
+        REJECT_THRESHOLD = 70.0 # 💡 ตัดตกที่ 70%
         progress_bar = st.progress(0)
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
             with col:
                 with st.container(border=True):
-                    d_name = f"{uploaded_file.name[:15]}..." if len(uploaded_file.name) > 15 else uploaded_file.name
+                    d_name = f"{uploaded_file.name[:20]}..." if len(uploaded_file.name) > 20 else uploaded_file.name
                     st.markdown(f"**🎬 {idx+1}. {d_name}**")
                     
                     uploaded_file.seek(0)
@@ -214,8 +207,8 @@ if uploaded_files:
                     final_score = 0.0
                     
                     try:
-                        with st.spinner("ประมวลผล..."):
-                            frames, skin_areas, obj_areas, dynamic_thresholds = process_video_advanced(video_path, target_fps=3)
+                        with st.spinner("กำลังวิเคราะห์สัดส่วนและความนิ่ง..."):
+                            frames, skin_areas, obj_areas = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย ไม่สามารถอ่านได้")
@@ -223,37 +216,47 @@ if uploaded_files:
                                 
                             frame_scores = []
                             with torch.no_grad():
-                                # ประมวลผลภาพแบบรวดเร็ว
                                 for frame_np in frames:
                                     pil_img = Image.fromarray(frame_np)
                                     input_tensor = transform(pil_img).unsqueeze(0).to(device)
-                                    output = vision_model(input_tensor)
+                                    output = model(input_tensor)
                                     frame_scores.append(torch.softmax(output, dim=1)[0][1].item())
                             
                             dynamic_base = (float(np.mean(frame_scores)) * 18.0) + (float(np.std(frame_scores)) * 6.0)
                             visual_penalty = 0.0
                             details_list = []
                             
+                            # ==========================================
+                            # 💡 กฎที่ 1: สัดส่วนมือต่อสินค้า (Hand-to-Object Ratio)
+                            # แก้ไขให้ยืดหยุ่น: มือมีขนาดใหญ่กว่าพื้นที่สินค้าที่จับได้ถึง 1.8 เท่า (รองรับถือถุงอาหารสัตว์)
+                            # ==========================================
                             miniature_frames = 0
-                            for s_area, o_area, thresh in zip(skin_areas, obj_areas, dynamic_thresholds):
+                            for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 500 and o_area > 500:
-                                    if (s_area / o_area) > thresh: 
+                                    if (s_area / o_area) > 1.8: 
                                         miniature_frames += 1
                                         
-                            if miniature_frames >= 2: # ปรับลดตาม FPS ที่ลดลง
+                            if miniature_frames >= 3:
                                 visual_penalty += 85.0 
-                                details_list.append("⛔ สเกลหลอกตา (สัดส่วนมือไม่สอดคล้องกับขนาดจริง)")
+                                details_list.append("⛔ สเกลสินค้าหลอกตา (สัดส่วนมือใหญ่ผิดปกติ)")
                             
+                            # ==========================================
+                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Stability)
+                            # แก้ไขให้ยืดหยุ่น: อนุญาตพื้นที่ยืดหยุ่นถึง 75% และความนิ่งผ่านเกณฑ์ที่ 40% (รองรับการยก แกว่ง ขยับถุงสินค้า)
+                            # ==========================================
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
-                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.80) 
+                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.75)
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
                                 
-                                if stability_percent <= 40.0: 
+                                if stability_percent <= 40.0:
                                     visual_penalty += 65.0
-                                    details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหดผิดปกติ")
+                                    details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (สเกลคงที่ <40%)")
                             
+                            # ==========================================
+                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง 2 วินาที (Melting Rule)
+                            # ==========================================
                             severe_streak = 0
                             max_severe_streak = 0
                             for s in frame_scores:
@@ -263,21 +266,25 @@ if uploaded_files:
                                 else:
                                     severe_streak = 0
                                     
-                            if max_severe_streak >= 6: # ปรับลดตาม FPS
+                            if max_severe_streak >= 12:
                                 visual_penalty += 68.0 
-                                details_list.append("⛔ ภาพละลาย/บิดเบี้ยวต่อเนื่อง")
-                            elif max_severe_streak >= 3: 
+                                details_list.append("⛔ ภาพละลาย/อวัยวะบิดเบี้ยวต่อเนื่องเกิน 2 วินาที")
+                            elif max_severe_streak >= 5: 
                                 visual_penalty += 12.0
-                                details_list.append("ภาพบิดเบี้ยวช่วงสั้น (อนุโลม)")
+                                details_list.append("ภาพบิดเบี้ยวช่วงสั้น ~1 วิ (อนุโลม)")
                                 
+                            # ==========================================
+                            # 💡 กฎที่ 4: วิเคราะห์เสียง
+                            # ==========================================
                             audio_penalty, audio_msgs = analyze_audio_strict(video_path)
                             if audio_msgs: details_list.extend(audio_msgs)
                             
+                            # สรุปคะแนนสุทธิ
                             raw_final = 2.0 + dynamic_base + visual_penalty + audio_penalty
                             final_score = min(100.0, max(1.0, raw_final))
                             
                             if not details_list:
-                                details = "✅ สมบูรณ์: สเกลและภาพสอดคล้อง เสียงชัดเจน"
+                                details = "✅ สมบูรณ์: สเกลถูกต้อง ภาพสมูท เสียงชัดเจน"
                             else:
                                 details = " | ".join(list(dict.fromkeys(details_list)))
                             
@@ -293,13 +300,17 @@ if uploaded_files:
                             st.progress(int(final_score))
                                 
                     except Exception as e:
-                        st.caption(f"⚠️ Error: {str(e)}")
+                        st.caption(f"⚠️ Error เกิดข้อผิดพลาดทางระบบ: {str(e)}")
                     finally:
                         if os.path.exists(video_path): os.unlink(video_path)
                         if 'frames' in locals(): del frames
                         if 'frame_scores' in locals(): del frame_scores
                         
                         gc.collect() 
+                        if torch.cuda.is_available(): 
+                            torch.cuda.empty_cache()
+                            torch.cuda.ipc_collect()
+                            
                         # 💡 ลดเวลาหน่วงเพื่อความรวดเร็ว
                         time.sleep(0.1)
                     
@@ -313,6 +324,9 @@ if uploaded_files:
             
             progress_bar.progress((idx + 1) / len(uploaded_files))
         
+        # ==========================================
+        # 5. แดชบอร์ดสรุปผลแบบตาราง
+        # ==========================================
         st.divider()
         st.subheader("📋 แดชบอร์ดสรุปผลการตรวจสอบ")
         df_all = pd.DataFrame(results_summary)
@@ -334,3 +348,5 @@ if uploaded_files:
             if not df_all[df_all['สถานะ'] == 'REJECT'].empty:
                 st.dataframe(df_all[df_all['สถานะ'] == 'REJECT'][["ลำดับ", "ชื่อไฟล์", "คะแนนความเสี่ยง", "หมายเหตุ"]], hide_index=True, use_container_width=True)
             else: st.info("ไม่มีคลิปที่ถูกปัดตก")
+        
+        st.success("🎉 ประมวลผลเสร็จสิ้น ระบบได้เคลียร์ Cache และ RAM อย่างสมบูรณ์แล้ว")
