@@ -9,3 +9,4 @@ pandas
 moviepy
 imageio-ffmpeg
 scipy
+ultralytics
