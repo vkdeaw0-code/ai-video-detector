@@ -27,12 +27,12 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บ
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Pro", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Dual-Mode Smart Engine 71%)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Height Silhouette Engine 71%)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 71% คือ ไม่ผ่าน (REJECT)**
-*   🎯 **Smart Dual-Mode:** แยกแยะระหว่าง "คนยืนรีวิวอาหารแมว" และ "มือชี้โชว์ของใช้/ถังขยะ" อย่างแม่นยำ
-*   🐱 **Presenter Mode (อาหารแมว):** อนุโลมให้แพ็กเกจขยับ ยับได้ และมือถือของได้ตามธรรมชาติ (ผ่านฉลุย)
-*   📦 **Showcase Mode (ชั้นวาง/ถังขยะ):** ล็อคเป้าจับโป๊ะสเกลแขน/มือยักษ์ และโครงสร้างบิดเบี้ยว (ปัดตกทันที)
+*   🎯 **Height Silhouette Router:** แยกแยะคนยืนพรีเซนต์จริง (ต้องมีโครงสร้างความสูงจากหัวถึงลำตัว) ออกจากแค่มือยื่นมาจับของ
+*   🐱 **Presenter Mode (คนยืนพรีเซนต์):** อนุโลมให้แพ็กเกจขยับ ยับได้ และมือถือของได้ตามธรรมชาติ (ผ่านฉลุย)
+*   📦 **Showcase Mode (สินค้าตั้งโต๊ะ/มือชี้):** ล็อคเป้าจับโป๊ะสเกลมือยักษ์ และโครงสร้างบิดเบี้ยว (ปัดตกทันที)
 *   ⚡ **Turbo Batch & Audio:** สแกนไวปรู๊ดปร๊าด พร้อมระบบตรวจสอบเสียงพากย์อัจฉริยะ
 """)
 
@@ -52,7 +52,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. เครื่องยนต์วิเคราะห์แยกประเภทและสเกล
+# 2. เครื่องยนต์วิเคราะห์โครงสร้างความสูงและสเกล
 # ==========================================
 def process_video_advanced(video_path, target_fps=6): 
     cap = cv2.VideoCapture(video_path)
@@ -63,7 +63,7 @@ def process_video_advanced(video_path, target_fps=6):
     frames = []
     skin_areas, obj_areas = [], []
     skin_widths, obj_widths = [], []
-    top_zone_skin = []
+    silhouette_scores = []
     
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
@@ -83,8 +83,16 @@ def process_video_advanced(video_path, target_fps=6):
             kernel_skin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel_skin)
             
-            # ตรวจสอบพิกเซลผิวหนังโซนบน (เช็คหน้า/หัวของพรีเซนเตอร์)
-            top_zone_skin.append(np.sum(skin_mask[:90, :] > 0))
+            # 💡 Height Silhouette Logic: เช็คความต่อเนื่องของร่างกายจากบนลงล่าง
+            # คนยืนจริง พิกเซลผิวหนังต้องกระจายตัวทั้งโซนบน (หัว) และโซนกลาง (ลำตัว)
+            top_zone = np.sum(skin_mask[:75, :] > 0)     # โซนหัว/คอ
+            middle_zone = np.sum(skin_mask[75:150, :] > 0) # โซนลำตัว/หน้าอก
+            
+            # ถ้ามีผิวหนังต่อเนื่องทั้งสองโซน แปลว่าเป็นคนยืนพรีเซนต์
+            if top_zone > 200 and middle_zone > 300:
+                silhouette_scores.append(1)
+            else:
+                silhouette_scores.append(0)
             
             skin_cnts, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             valid_skin = [c for c in skin_cnts if cv2.contourArea(c) > 200]
@@ -124,9 +132,11 @@ def process_video_advanced(video_path, target_fps=6):
         count += 1
     cap.release()
     
-    # 🧠 แยกโหมดอัจฉริยะ (Smart Router):
-    median_top = np.median([t for t in top_zone_skin if t > 0]) if any(t > 0 for t in top_zone_skin) else 0
-    is_presenter = median_top > 1500
+    # 🧠 ตัดสินโหมดด้วยโครงสร้างความสูง (Silhouette Router):
+    # ถ้าในคลิปมีเฟรมที่ตรวจพบคนยืน (มีหัว + ลำตัว) มากกว่า 20% ของวิดีโอ -> Presenter Mode
+    # นอกนั้น (เช่น มีแต่วัตถุตั้งโต๊ะและมีแค่มือยื่นมาจิ้ม) -> Showcase Mode
+    presenter_frames_ratio = sum(silhouette_scores) / max(1, len(silhouette_scores))
+    is_presenter = presenter_frames_ratio >= 0.20
     
     return frames, skin_areas, obj_areas, skin_widths, obj_widths, is_presenter
 
@@ -202,7 +212,7 @@ if uploaded_files:
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกนแยกหมวดูเลอัจฉริยะ (Dual-Mode Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนโครงสร้างอัจฉริยะ (Silhouette Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -230,7 +240,7 @@ if uploaded_files:
                     mode_label = ""
                     
                     try:
-                        with st.spinner("กำลังแยกประเภทและวิเคราะห์สเกล..."):
+                        with st.spinner("กำลังตรวจสอบโครงสร้างคนยืนและสเกล..."):
                             frames, skin_areas, obj_areas, skin_widths, obj_widths, is_presenter = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
@@ -252,27 +262,27 @@ if uploaded_files:
                             details_list = []
                             
                             if is_presenter:
-                                mode_label = "🐱 โหมดพรีเซนเตอร์ (อาหารแมว/คนยืนรีวิว)"
+                                mode_label = "🐱 โหมดพรีเซนต์ (คนยืนพรีเซนต์จริง)"
                                 dynamic_base = (float(np.mean(frame_scores)) * 12.0) + (float(np.std(frame_scores)) * 5.0)
                             else:
-                                mode_label = "📦 โหมดโชว์สินค้า (ชั้นวาง/ถังขยะ)"
+                                mode_label = "📦 โหมดสินค้าตั้งโต๊ะ (มือชี้/สินค้าโชว์)"
                                 dynamic_base = (float(np.mean(frame_scores)) * 55.0) + (float(np.std(frame_scores)) * 15.0)
                             
                             st.caption(f"_{mode_label}_")
                             
                             # ==========================================
-                            # 💡 กฎที่ 1: ตรวจสอบสเกล (ทำงานเฉพาะโหมด Showcase)
+                            # 💡 กฎที่ 1: ตรวจสอบสเกล (ทำงานเฉพาะโหมดสินค้าตั้งโต๊ะ)
                             # ==========================================
                             scale_violation_frames = 0
                             if not is_presenter:
                                 for s_area, o_area, s_w, o_w in zip(skin_areas, obj_areas, skin_widths, obj_widths):
                                     if s_area > 200 and o_area > 500:
-                                        if (s_w / (o_w + 1) > 0.45) or (s_area / (o_area + 1) > 0.35):
+                                        if (s_w / (o_w + 1) > 0.40) or (s_area / (o_area + 1) > 0.30):
                                             scale_violation_frames += 1
                                             
-                                if scale_violation_frames >= 3:
+                                if scale_violation_frames >= 2:
                                     visual_penalty += 71.0
-                                    details_list.append("⛔ สเกลผิดธรรมชาติ (มือ/แขนใหญ่เกินสัดส่วนสินค้าชิ้นใหญ่)")
+                                    details_list.append("⛔ สเกลผิดธรรมชาติ (มือ/แขนใหญ่เกินสัดส่วนสินค้า)")
                             
                             # ==========================================
                             # 💡 กฎที่ 2: ความคงที่รูปทรงวัตถุ (Structural Stability)
@@ -328,7 +338,7 @@ if uploaded_files:
                             
                             if not details_list:
                                 if is_presenter:
-                                    details = "✅ สมบูรณ์ (Presenter Mode): สเกลคนและสินค้าถูกต้อง"
+                                    details = "✅ สมบูรณ์ (Presenter Mode): โครงสร้างคนยืนและสินค้าถูกต้อง"
                                 else:
                                     details = "✅ สมบูรณ์ (Showcase Mode): สเกลสมจริง โครงสร้างมั่นคง"
                             else:
