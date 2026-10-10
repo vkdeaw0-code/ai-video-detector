@@ -1180,12 +1180,9 @@ def analyze_clip(
                 error = (
                     "ตรวจภาพ AI ไม่สำเร็จ: " + str(exc)[:240]
                 )
-
-        
+      
         else:
             error = "ยังไม่มี Gemini API Key — ตรวจได้เฉพาะเทคนิค ไม่ตัดสิน PASS"
-
-            )
 
         special = chosen_profile in {
             "HOUSEHOLD_HANDS", "PET_PRESENTER"
@@ -1194,7 +1191,7 @@ def analyze_clip(
         if client and sound.get("present") and not intentional_silent:
             if use_transcription:
                 try:
-                    progress(
+                     progress(
                         "ถอดเสียงภาษาไทย "
                         "(ข้อความช่วยตรวจ ไม่ใช่หลักฐานคำผิด)"
                     )
