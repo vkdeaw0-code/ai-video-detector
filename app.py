@@ -17,13 +17,13 @@ from torchvision import transforms
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate - Scale & Proportion)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate - Strict Audio)")
 st.markdown("""
 **เกณฑ์ตัดสิน: ความเสี่ยง ≥ 76% คือ ไม่ผ่าน (REJECT)**
-*   📏 **Proportion Logic:** แยกแยะสินค้าตั้งโต๊ะ (ผ่าน) ออกจาก สินค้าสเกลหลอกตา/ของเล่นจิ๋ว (ตก) โดยคำนวณพื้นที่มือเทียบกับสินค้า
+*   👂 **Audio Strict:** ตัดตกทันทีหากพบเสียงหุ่นยนต์แบนราบ หรือ **อ่านสะดุด/เพี้ยนมากกว่า 1 คำขึ้นไป** (อนุโลมแค่ 1 คำ)
+*   📏 **Proportion Logic:** แยกแยะสินค้าตั้งโต๊ะ (ผ่าน) ออกจาก สินค้าสเกลหลอกตา/ของเล่นจิ๋ว (ตก)
 *   📦 **Scale Stability:** สเกลคนและสินค้าต้องถูกต้องคงที่ **> 60% ของคลิป**
 *   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
-*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
 """)
 
 @st.cache_resource
@@ -132,12 +132,13 @@ def analyze_audio_strict(video_path):
             
             stutter_points = np.sum(energy_diffs > (mean_diff + 3.5 * std_diff))
             
-            if stutter_points > 3:
-                audio_penalty += 68.0 # เพี้ยนเยอะ ปัดตก
-                audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
-            elif stutter_points >= 2:
-                audio_penalty += 15.0 # เพี้ยนนิดหน่อย อนุโลม
-                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1-2 คำ (อนุโลม)")
+            # 💡 ปรับแก้ให้เข้มงวด: สะดุดมากกว่า 1 คำ (>= 2) คือไม่ผ่านเลย
+            if stutter_points >= 2:
+                audio_penalty += 68.0 # เพี้ยนมากกว่า 1 คำ ปัดตกทันที
+                audio_msgs.append("⛔ เสียงพากย์พัง/คำสะดุดมากกว่า 1 คำ (ตัดตก)")
+            elif stutter_points == 1:
+                audio_penalty += 10.0 # อนุโลมให้พลาดได้แค่ 1 คำ
+                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1 คำ (อนุโลม)")
 
         # 3.2 ตรวจเสียงหุ่นยนต์แบนราบ (Robotic Flatness)
         window_large = int(sample_rate * 0.2)
@@ -149,7 +150,7 @@ def analyze_audio_strict(video_path):
             
             if variance_e < 0.08 and mean_e > 100:
                 audio_penalty += 65.0
-                audio_msgs.append("⚠️ เสียงแบนราบเป็นหุ่นยนต์/ฟังไม่รู้ภาษา")
+                audio_msgs.append("⛔ เสียงแบนราบเป็นหุ่นยนต์/ฟังไม่รู้ภาษา (ตัดตก)")
             elif variance_e < 0.25 and mean_e > 100:
                 audio_penalty += 8.0
                 if not audio_msgs: audio_msgs.append("🔊 เสียงพูดคล้าย AI แต่ฟังรู้เรื่อง (ผ่าน)")
