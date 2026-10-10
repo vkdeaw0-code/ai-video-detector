@@ -1025,11 +1025,12 @@ def _transcribe(
     return str(result.text or "")[:1800]
 
 
+
 def analyze_clip(
     file_bytes: bytes,
     filename: str,
     api_key: str = "",
-    model: str = "gpt-4.1",
+    model: str = "gemini-2.5-flash",
     reference: Image.Image | None = None,
     expected_name: str = "",
     stylized: bool = False,
@@ -1049,9 +1050,10 @@ def analyze_clip(
     glossary: list[str] | None = None,
     max_word_errors: int = 2,
     word_overflow_action: str = "FAIL",
-    audio_model: str = "gpt-audio-1.5",
-    transcription_model: str = "gpt-transcribe",
+    audio_model: str = "gemini-2.5-flash",
+    transcription_model: str = "gemini-2.5-flash",
 ) -> dict:
+
     progress = progress or (lambda _: None)
 
     if not file_bytes:
@@ -1060,42 +1062,46 @@ def analyze_clip(
     if len(file_bytes) > max_mb * 1024 * 1024:
         raise ValueError(f"ไฟล์ใหญ่เกิน {max_mb} MB")
 
-    suffix = Path(filename).suffix.lower()
+    if Path(filename).suffix.lower() not in {
+        ".mp4", ".mov", ".avi", ".webm", ".mkv"
+    }:
+        raise ValueError("รูปแบบไฟล์วิดีโอไม่รองรับ")
 
-    if suffix not in {".mp4", ".mov", ".avi", ".webm", ".mkv"}:
-        raise ValueError("รองรับเฉพาะ .mp4, .mov, .avi, .webm, .mkv")
-
-    if not 0 <= review_score < pass_score <= 100:
+    if not (0 <= review_score < pass_score <= 100):
         raise ValueError("ช่วงคะแนนไม่ถูกต้อง")
 
-    if profile not in PROFILES or word_overflow_action not in {"FAIL", "REVIEW"}:
-        raise ValueError("เกณฑ์ประเภท/คำผิดไม่ถูกต้อง")
+    if profile not in PROFILES:
+        raise ValueError("ไม่พบเกณฑ์การตรวจสอบ")
+
+    if word_overflow_action not in {"FAIL", "REVIEW"}:
+        raise ValueError("การตั้งค่าคำผิดไม่ถูกต้อง")
 
     if not isinstance(max_word_errors, int) or not 0 <= max_word_errors <= 20:
-        raise ValueError("จำนวนคำผิดที่ยอมรับต้องเป็นจำนวนเต็ม 0–20")
+        raise ValueError("จำนวนคำผิดต้องอยู่ระหว่าง 0 ถึง 20")
 
     glossary = glossary or []
     api_key = api_key.strip()
 
     with tempfile.TemporaryDirectory(prefix="clipqc_") as tempdir:
-        video_path = str(Path(tempdir) / ("input" + suffix))
+        video_path = str(
+            Path(tempdir) / ("input" + Path(filename).suffix.lower())
+        )
         Path(video_path).write_bytes(file_bytes)
 
         video = _scan_video(
             video_path,
             sample_fps=sample_fps,
-            progress=progress,
+            progress=progress
         )
 
         progress("ตรวจระดับเสียงและสัญญาณเสียง")
         sound = _scan_audio(video_path, video["duration"])
 
-        issues = (
-            _technical_issues(
-                video, target_duration, duration_tolerance
-            )
-            + sound["issues"]
+        technical = _technical_issues(
+            video, target_duration, duration_tolerance
         )
+
+        issues = technical + sound["issues"]
 
         for issue in issues:
             if (
@@ -1104,26 +1110,30 @@ def analyze_clip(
             ):
                 issue["verified"] = True
 
-        client, vis, error = None, {}, None
-        speech, scale = None, None
+        client = None
+        vis = {}
+        error = None
+        speech = None
+        scale = None
+        speech_error = None
+        scale_error = None
+
         chosen_profile = profile if profile != "AUTO" else "GENERAL"
         profile_uncertain = profile == "AUTO"
-        speech_error, scale_error = None, None
 
         if api_key:
             try:
                 from gemini_bridge import GeminiAdapter
-                client = GeminiAdapter(
-                api_key=api_key,
-                model=model
-                )
 
+                client = GeminiAdapter(
+                    api_key=api_key,
+                    model=model
+                )
 
                 sheets = _make_sheets(video["samples"])
 
                 progress(
-                    f"AI ตรวจภาพและประเภท "
-                    f"{len(video['samples'])} เฟรม"
+                    f"AI ตรวจภาพและประเภท {len(video['samples'])} เฟรม"
                 )
 
                 vis = _inspect_visual(
@@ -1134,7 +1144,7 @@ def analyze_clip(
                     expected_name,
                     stylized,
                     video["duration"],
-                    profile,
+                    profile
                 )
 
                 if profile == "AUTO":
@@ -1143,9 +1153,7 @@ def analyze_clip(
                     if (
                         proposal in PROFILES
                         and proposal != "AUTO"
-                        and _clamp(
-                            vis.get("profile_confidence")
-                        ) >= 0.85
+                        and _clamp(vis.get("profile_confidence")) >= 0.85
                     ):
                         chosen_profile = proposal
                         profile_uncertain = False
@@ -1153,7 +1161,7 @@ def analyze_clip(
                 model_issues = _normalize_ai_issues(
                     vis.get("issues"),
                     video["samples"],
-                    video["duration"],
+                    video["duration"]
                 )
 
                 issues.extend(model_issues)
@@ -1164,8 +1172,7 @@ def analyze_clip(
                         and issue["confidence"] >= 0.85
                     ):
                         progress(
-                            f"ยืนยันตำหนิรุนแรงที่ "
-                            f"{issue['start']:.2f}s"
+                            f"ยืนยันตำหนิรุนแรงที่ {issue['start']:.2f}s"
                         )
 
                         issue["verified"] = _verify_severe(
@@ -1173,33 +1180,36 @@ def analyze_clip(
                             model,
                             issue,
                             video["samples"],
-                            reference,
+                            reference
                         )
 
             except Exception as exc:
-                error = (
-                    "ตรวจภาพ AI ไม่สำเร็จ: " + str(exc)[:240]
-                )
-      
+                error = f"ตรวจภาพ AI ไม่สำเร็จ: {str(exc)[:240]}"
+
         else:
-            error = "ยังไม่มี Gemini API Key — ตรวจได้เฉพาะเทคนิค ไม่ตัดสิน PASS"
+            error = (
+                "ยังไม่มี Gemini API Key — "
+                "ตรวจได้เฉพาะเทคนิค ไม่ตัดสิน PASS"
+            )
 
         special = chosen_profile in {
-            "HOUSEHOLD_HANDS", "PET_PRESENTER"
+            "HOUSEHOLD_HANDS",
+            "PET_PRESENTER"
         }
 
-        if client and sound.get("present") and not intentional_silent:
+        if (
+            client
+            and sound.get("present")
+            and not intentional_silent
+        ):
             if use_transcription:
                 try:
-                     progress(
-                        "ถอดเสียงภาษาไทย "
-                        "(ข้อความช่วยตรวจ ไม่ใช่หลักฐานคำผิด)"
-                    )
+                    progress("ถอดเสียงภาษาไทย")
 
                     sound["transcript"] = _transcribe(
                         client,
                         sound["wav_bytes"],
-                        transcription_model,
+                        transcription_model
                     )
 
                 except Exception as exc:
@@ -1207,10 +1217,7 @@ def analyze_clip(
 
             if special and use_audio_ai:
                 try:
-                    progress(
-                        "ฟังเสียงจริงเพื่อตรวจคำไทย "
-                        "และยืนยันคำผิดซ้ำ"
-                    )
+                    progress("ฟังเสียงจริงและตรวจคำพูดภาษาไทย")
 
                     raw, confirmations = inspect_speech(
                         client,
@@ -1219,7 +1226,7 @@ def analyze_clip(
                         sound.get("transcript", ""),
                         reference_script,
                         glossary,
-                        video["duration"],
+                        video["duration"]
                     )
 
                     speech = speech_gate(
@@ -1228,7 +1235,7 @@ def analyze_clip(
                         video["duration"],
                         glossary,
                         max_word_errors,
-                        word_overflow_action,
+                        word_overflow_action
                     )
 
                 except Exception as exc:
@@ -1236,12 +1243,12 @@ def analyze_clip(
 
             elif not special and use_audio_ai:
                 try:
-                    progress("ฟังคุณภาพเสียงทั่วไป")
+                    progress("ตรวจคุณภาพเสียงทั่วไป")
 
                     audio_issues = _inspect_audio_ai(
                         client,
                         sound["wav_bytes"],
-                        video["duration"],
+                        video["duration"]
                     )
 
                     issues.extend(audio_issues)
@@ -1254,7 +1261,7 @@ def analyze_clip(
                             issue["verified"] = _verify_audio_severe(
                                 client,
                                 sound["wav_bytes"],
-                                issue,
+                                issue
                             )
 
                 except Exception as exc:
@@ -1267,7 +1274,7 @@ def analyze_clip(
         if special and speech is None:
             reason = speech_error or (
                 "เกณฑ์นี้ต้องฟังคำพูดภาษาไทย "
-                "แต่ปิดการฟัง AI/ไม่มีเสียง/ยังไม่มี API"
+                "แต่ไม่สามารถประเมินเสียงได้"
             )
 
             speech = speech_gate(
@@ -1277,7 +1284,7 @@ def analyze_clip(
                 glossary,
                 max_word_errors,
                 word_overflow_action,
-                error=reason,
+                error=reason
             )
 
         if chosen_profile == "HOUSEHOLD_HANDS":
@@ -1288,10 +1295,7 @@ def analyze_clip(
 
             if client and vis and spoken.strip():
                 try:
-                    progress(
-                        "เทียบขนาดสินค้า/มือกับคำกล่าวอ้าง "
-                        "และตรวจซ้ำข้อขัดแย้ง"
-                    )
+                    progress("เทียบขนาดสินค้ากับคำพูด")
 
                     raw_scale, scale_confirmations = inspect_scale(
                         client,
@@ -1300,7 +1304,7 @@ def analyze_clip(
                         _make_sheets(video["samples"]),
                         spoken,
                         product_facts,
-                        reference,
+                        reference
                     )
 
                     scale = scale_gate(
@@ -1308,7 +1312,7 @@ def analyze_clip(
                         spoken,
                         [t for t, _ in video["samples"]],
                         scale_confirmations,
-                        product_facts=product_facts,
+                        product_facts=product_facts
                     )
 
                 except Exception as exc:
@@ -1320,27 +1324,32 @@ def analyze_clip(
                     spoken,
                     [],
                     {},
-                    error=scale_error or (
-                        "ยังไม่มีภาพ/คำพูดที่ใช้เทียบสเกลได้"
-                    ),
+                    error=(
+                        scale_error
+                        or "ยังไม่มีภาพหรือคำพูดที่ใช้เทียบสเกลได้"
+                    )
                 )
 
         for category, gate in (
             ("speech", speech),
-            ("scale", scale),
+            ("scale", scale)
         ):
             if gate and gate["status"] != "PASS":
-                failed = gate["status"] == "FAIL"
-
                 issues.append({
                     "category": category,
-                    "severity": "severe" if failed else "moderate",
-                    "confidence": 0.90 if failed else 0.60,
+                    "severity": (
+                        "severe" if gate["status"] == "FAIL"
+                        else "moderate"
+                    ),
+                    "confidence": (
+                        0.9 if gate["status"] == "FAIL"
+                        else 0.6
+                    ),
                     "start": 0.0,
                     "end": video["duration"],
                     "description": gate["reason"],
                     "source": "profile_gate",
-                    "verified": failed,
+                    "verified": gate["status"] == "FAIL"
                 })
 
         clip_type = str(vis.get("clip_type", "UNKNOWN"))
@@ -1348,8 +1357,9 @@ def analyze_clip(
         if clip_type not in CLIP_TYPES:
             clip_type = "UNKNOWN"
 
-        if clip_type == "PRODUCT_ONLY" and (
-            vis.get("has_human") or vis.get("has_hands")
+        if (
+            clip_type == "PRODUCT_ONLY"
+            and (vis.get("has_human") or vis.get("has_hands"))
         ):
             clip_type = "MIXED"
 
@@ -1365,18 +1375,17 @@ def analyze_clip(
         ):
             error = (
                 (error + " | " if error else "")
-                + "ภาพไม่พร้อมใช้งานหรือไม่เห็นสินค้าที่ประเมินได้"
+                + "ภาพไม่พร้อมใช้งานหรือไม่เห็นสินค้า"
             )
 
-        # คลิปคนรีวิว: ไม่หักคะแนนตำหนิภาพเล็กน้อย
         score_issues = [
-            i for i in issues
+            issue for issue in issues
             if not (
                 chosen_profile == "PET_PRESENTER"
-                and i["category"] in {
+                and issue["category"] in {
                     "human", "product", "motion", "visual", "text"
                 }
-                and i["severity"] != "severe"
+                and issue["severity"] != "severe"
             )
         ]
 
@@ -1395,11 +1404,12 @@ def analyze_clip(
             review_score,
             visual_complete,
             error,
-            PROFILE_WEIGHTS.get(chosen_profile),
+            PROFILE_WEIGHTS.get(chosen_profile)
         )
 
         if (
-            abs(video["duration"] - target_duration) > duration_tolerance
+            abs(video["duration"] - target_duration)
+            > duration_tolerance
             and score["status"] == "PASS"
         ):
             score["status"] = "REVIEW"
@@ -1409,13 +1419,12 @@ def analyze_clip(
             chosen_profile,
             speech,
             scale,
-            profile_uncertain,
+            profile_uncertain
         )
 
         report = {
             "filename": filename,
             "type": clip_type,
-            "type_label": CLIP_TYPES[clip_type],
             "profile": chosen_profile,
             "profile_label": PROFILES[chosen_profile],
             "requested_profile": profile,
@@ -1427,15 +1436,19 @@ def analyze_clip(
                 "word_overflow_action": word_overflow_action,
                 "product_facts": product_facts,
                 "reference_script": reference_script,
-                "glossary": glossary,
+                "glossary": glossary
             },
             "models": {
                 "visual": model,
                 "audio": audio_model,
-                "transcription": transcription_model,
+                "transcription": transcription_model
             },
+            "type_label": CLIP_TYPES[clip_type],
             "summary": str(
-                vis.get("summary", "ยังไม่ได้รับผลประเมินภาพจาก AI")
+                vis.get(
+                    "summary",
+                    "ยังไม่ได้รับผลประเมินภาพจาก AI"
+                )
             )[:450],
             "visual_quality": str(
                 vis.get("overall_visual_quality", "unknown")
@@ -1445,7 +1458,9 @@ def analyze_clip(
             "has_product": bool(vis.get("has_product", False)),
             "duration": video["duration"],
             "fps": video["fps"],
-            "resolution": f"{video['width']}x{video['height']}",
+            "resolution": (
+                f"{video['width']}x{video['height']}"
+            ),
             "sample_count": len(video["samples"]),
             "score_is_partial": bool(
                 not visual_complete
@@ -1465,7 +1480,7 @@ def analyze_clip(
             "analysis_error": error,
             "model": model if api_key else "technical only",
             **score,
-            "evidence": {},
+            "evidence": {}
         }
 
         for i, issue in enumerate(issues):
@@ -1482,14 +1497,15 @@ def analyze_clip(
                         c for c in scale["claims"]
                         if c.get("verified")
                     ),
-                    scale["claims"][0],
+                    scale["claims"][0]
                 )
 
                 issue["start"] = claim["frame_time"]
                 issue["end"] = claim["frame_time"]
 
             evidence = nearest_evidence(
-                video["samples"], float(issue["start"])
+                video["samples"],
+                float(issue["start"])
             )
 
             if evidence is not None:
