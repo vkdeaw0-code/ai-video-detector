@@ -17,8 +17,8 @@ from torchvision import transforms
 # 1. ตั้งค่าหน้าเว็บ Streamlit และโหลดโมเดล
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Pro", page_icon="🎬", layout="wide")
-st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (เวอร์ชันปล่อยผ่านคลิปขายของสมูท)")
-st.write("ระบบตรวจจับเฉพาะจุดพังรุนแรง: **เกณฑ์ตัดตก 76% ขึ้นไป** | ปล่อยผ่านคลิปขายของที่มีการซูมกล้อง แพนภาพ และเสียงพูดชัดเจน | ตัดตกเฉพาะอวัยวะ/สินค้าพังเกิน 1 วินาที หรือเสียงเพี้ยนฟังไม่รู้เรื่อง")
+st.title("🎬 ระบบคัดกรองคุณภาพคลิปวิดีโอ AI (โหมดยืดหยุ่นพิเศษ)")
+st.write("ระบบตรวจจับเฉพาะจุดพังร้ายแรง: **เกณฑ์ตัดตก 76% ขึ้นไป** | อนุโลมจุดบกพร่องสั้นๆ (1-3 วิ) | ตัดตกเฉพาะมือ/อวัยวะ/สินค้าพังเกิน **3 วินาทีขึ้นไป** หรือเสียงพูดฟังไม่รู้เรื่อง")
 
 @st.cache_resource
 def load_detection_models():
@@ -85,7 +85,6 @@ def analyze_audio_quality(video_path):
             
         data_float = data.astype(np.float32)
         
-        # คำนวณความผันผวนพลังงานเสียง (Energy Variance)
         window_size = int(sample_rate * 0.1) 
         energies = np.array([np.sum(data_float[i:i+window_size]**2) for i in range(0, len(data_float), window_size)])
         
@@ -93,12 +92,12 @@ def analyze_audio_quality(video_path):
             mean_energy = np.mean(energies)
             energy_variance = np.var(energies) / (mean_energy + 1e-6)
             
-            # จะลงโทษหนักก็ต่อเมื่อเสียงแบนราบเป็นหุ่นยนต์ไร้จังหวะหายใจอย่างรุนแรง (ฟังไม่เป็นภาษา)
-            if energy_variance < 0.12 and mean_energy > 100: 
-                audio_penalty += 70.0 # ตัดตกทันที
+            # ตัดตกเฉพาะเสียงแบนราบเป็นหุ่นยนต์ฟังไม่เป็นภาษาไทย/อังกฤษอย่างรุนแรง
+            if energy_variance < 0.10 and mean_energy > 100: 
+                audio_penalty += 72.0 # ตัดตกทันที
                 audio_msg = "🔊 เสียงพูดเพี้ยนมาก/ฟังไม่รู้ภาษา (ตัดตก)"
-            elif energy_variance < 0.28 and mean_energy > 100:
-                audio_penalty += 15.0 # เสียงสังเคราะห์เล็กน้อยแต่ยังฟังรู้เรื่อง (อนุโลมให้ผ่าน)
+            elif energy_variance < 0.25 and mean_energy > 100:
+                audio_penalty += 10.0 # เสียงสังเคราะห์เล็กน้อยแต่ฟังออก (อนุโลมให้ผ่าน)
                 audio_msg = "🔊 มีเสียงสังเคราะห์แต่ฟังรู้เรื่อง (อนุโลมผ่าน)"
         
     except Exception:
@@ -122,7 +121,7 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        REJECT_THRESHOLD = 76.0 # 💡 ตัดตกที่ 76% ขึ้นไป
+        REJECT_THRESHOLD = 76.0 # 💡 เกณฑ์ตัดตกที่ 76% ขึ้นไป
         
         for idx, uploaded_file in enumerate(uploaded_files):
             col = cols[idx % 3]
@@ -135,7 +134,7 @@ if uploaded_files:
                     tfile.write(uploaded_file.read())
                     video_path = tfile.name
                     
-                    final_score = 5.0 # คะแนนฐานตั้งต้นเพียง 5%
+                    final_score = 5.0 # คะแนนฐานเริ่มต้นที่ 5%
                     status = "ERROR"
                     details = ""
                     
@@ -158,31 +157,33 @@ if uploaded_files:
                                 visual_penalty = 0.0
                                 details_list = []
                                 
-                                # เช็กจุดบกพร่องร้ายแรง (ต้องเป็นเฟรมที่โมเดลมั่นใจสูงเกือบ 100% ว่าพังจริง)
                                 severe_streak = 0
                                 max_severe_streak = 0
                                 
                                 for s in frame_scores:
-                                    if s > 0.985: # ปรับเกณฑ์ความแน่ชัดให้สูงขึ้น เพื่อไม่ให้จับผิดการขยับซูมกล้อง
+                                    if s > 0.985: # สแกนจุดผิดปกติความมั่นใจสูง
                                         severe_streak += 1
                                         max_severe_streak = max(max_severe_streak, severe_streak)
                                     else:
                                         severe_streak = 0
                                         
-                                # กฎ 1 วินาที (6 เฟรมที่ 6 FPS = 1 วินาทีเต็ม)
-                                if max_severe_streak >= 6: 
-                                    visual_penalty += 75.0 # หากมือ/ขา/อวัยวะ ละลายพังติดต่อกันเกิน 1 วิ ตัดตกทันที
-                                    details_list.append("⚠️ มือ/ขา/อวัยวะ หรือสินค้า บิดเบี้ยวพังเกิน 1 วินาที")
+                                # 💡 กฎใหม่: 18 เฟรมที่ 6 FPS = 3 วินาทีเต็ม
+                                if max_severe_streak >= 18: 
+                                    visual_penalty += 72.0 # พังค้างเกิน 3 วินาทีเต็ม (ตัดตก >= 76%)
+                                    details_list.append("⚠️ มือ/ขา/อวัยวะ หรือสินค้า บิดเบี้ยวพังเกิน 3 วินาที")
+                                elif max_severe_streak >= 6: 
+                                    visual_penalty += 15.0 # พังช่วง 1-3 วินาที (อนุโลมผ่าน ได้คะแนนเสี่ยงแค่ ~20-30%)
+                                    details_list.append("อวัยวะ/สินค้าบิดเบี้ยวเล็กน้อย 1-3 วิ (อนุโลมให้ผ่าน)")
                                 elif max_severe_streak >= 2:
-                                    visual_penalty += 10.0 # แวบเดียวไม่ถึงวินาที บวกแต้มเล็กน้อย (ผ่านสบาย)
-                                    details_list.append("ภาพกระตุก/ละลายเล็กน้อย ไม่ถึง 1 วิ (อนุโลม)")
+                                    visual_penalty += 5.0 # แวบเดียวไม่ถึง 1 วิ (ผ่านสบาย)
+                                    details_list.append("ภาพกระตุก/ละลายเล็กน้อย ไม่ถึง 1 วิ (อนุโลมให้ผ่าน)")
                                 
                                 # ตรวจสอบเสียง
                                 audio_penalty, audio_msg = analyze_audio_quality(video_path)
                                 if audio_msg and audio_msg != "🔊 เสียงพูดชัดเจนเป็นธรรมชาติ":
                                     details_list.append(audio_msg)
                                 
-                                # คำนวณคะแนนรวมสุทธิ (จำกัดช่วงที่ 1 - 100%)
+                                # คำนวณคะแนนรวมสุทธิ (1 - 100%)
                                 final_score = min(100.0, max(1.0, final_score + visual_penalty + audio_penalty))
                                 
                                 if not details_list:
