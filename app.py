@@ -21,15 +21,15 @@ np.random.seed(42)
 # ==========================================
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
-st.set_page_config(page_title="AI Video Inspector (Classic Stable)", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Classic Stable - Turbo Batch 70%)")
+st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Strict Original + Turbo Batch 70%)")
 st.markdown("""
-**เวอร์ชันเสถียรดั้งเดิม (ไร้ปัญหาค้าง) + 🚀 เร่งความเร็วด้วย Batch Processing**
-*   ⚡ **Turbo Batch Mode:** ประมวลผลภาพมัดรวม (Batch) เร็วขึ้น 3-5 เท่าโดยความแม่นยำเท่าเดิม 100%
-*   📏 **Proportion Logic:** รองรับการถือสินค้าขนาดใหญ่ (เช่น ถุงอาหารสัตว์) โดยไม่ปัดตกมั่ว
-*   📦 **Scale Stability:** อนุโลมการขยับและแกว่งสินค้า
-*   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่อง
-*   👂 **Audio Strict:** ตัดตกเสียงหุ่นยนต์/สะดุด
+**เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
+*   ⚡ **Turbo Batch:** ประมวลผลไวขึ้นด้วยการมัดรวมภาพ (Batch Processing) แต่ใช้ความละเอียด FPS เท่าเดิม
+*   📏 **Dynamic Proportion:** สินค้าทั่วไปใช้เกณฑ์โหด (มือ > 85% ปัดตก) แต่อนุโลมเฉพาะสินค้าไซส์ยักษ์ (เช่น ถุงอาหารสัตว์)
+*   📦 **Dynamic Stability:** สินค้าทั่วไปต้องนิ่ง > 60% (อนุโลมเฉพาะของชิ้นใหญ่มาก > 40%)
+*   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
+*   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
 """)
 
 @st.cache_resource
@@ -50,7 +50,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. เครื่องยนต์วิเคราะห์สเกลและรูปทรง (ดั้งเดิม เสถียรสุด)
 # ==========================================
-def process_video_advanced(video_path, target_fps=3):
+def process_video_advanced(video_path, target_fps=6): # 💡 กลับมาใช้ FPS 6 ตามโค้ดดั้งเดิมที่เข้มงวด
     cap = cv2.VideoCapture(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0 or np.isnan(video_fps): video_fps = 30
@@ -65,7 +65,7 @@ def process_video_advanced(video_path, target_fps=3):
     
     count = 0
     while cap.isOpened():
-        ret, frame = cap.read() # ใช้ .read() ที่เสถียรที่สุดเพื่อป้องกันเว็บค้าง
+        ret, frame = cap.read() 
         if not ret: break
         
         if count % interval == 0:
@@ -136,7 +136,7 @@ def analyze_audio_strict(video_path):
                 audio_msgs.append("⚠️ เสียงพูดพัง/คำสะดุดรัวเกิน 2 คำ")
             elif stutter_points >= 2:
                 audio_penalty += 15.0 
-                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย (อนุโลม)")
+                audio_msgs.append("🔊 เสียงสะดุดเล็กน้อย 1-2 คำ (อนุโลม)")
 
         window_large = int(sample_rate * 0.2)
         energies_large = np.array([np.sum(data_float[i:i+window_large]**2) for i in range(0, len(data_float), window_large)])
@@ -174,7 +174,7 @@ if uploaded_files:
 
     st.info(f"📁 เตรียมประมวลผลวิดีโอทั้งหมด {len(uploaded_files)} คลิป")
     
-    if st.button("🔍 เริ่มระบบสแกน (Turbo Quality Scan)", type="primary"):
+    if st.button("🔍 เริ่มระบบสแกนเจาะลึก (Strict Batch Scan)", type="primary"):
         st.divider()
         st.subheader("📊 ผลการวิเคราะห์รายคลิป:")
         
@@ -201,26 +201,22 @@ if uploaded_files:
                     final_score = 0.0
                     
                     try:
-                        with st.spinner("กำลังวิเคราะห์..."):
-                            frames, skin_areas, obj_areas = process_video_advanced(video_path, target_fps=3)
+                        with st.spinner("กำลังวิเคราะห์สัดส่วนและความนิ่ง..."):
+                            frames, skin_areas, obj_areas = process_video_advanced(video_path, target_fps=6)
                             
                             if not frames:
                                 st.caption("⚠️ ไฟล์วิดีโอเสีย ไม่สามารถอ่านได้")
                                 continue
                                 
                             frame_scores = []
-                            # ==========================================
-                            # 🚀 จุดที่เพิ่มเข้ามา: Batch Processing (มัดรวมภาพ)
-                            # แทนที่จะรันทีละรูป เรามัดรวมทีละ 16 รูป ส่งให้ AI ตรวจทีเดียว
-                            # ช่วยลด Overhead ของเซิร์ฟเวอร์ และประหยัดเวลาลง 3-5 เท่า
-                            # ==========================================
+                            # เร่งความเร็วด้วย Batch Processing
                             batch_size = 16 
                             with torch.no_grad():
                                 for i in range(0, len(frames), batch_size):
                                     batch_frames = frames[i:i+batch_size]
                                     tensors = [transform(Image.fromarray(f)) for f in batch_frames]
-                                    input_batch = torch.stack(tensors).to(device) # มัดรวม
-                                    output = model(input_batch) # ประมวลผลรวดเดียว
+                                    input_batch = torch.stack(tensors).to(device)
+                                    output = model(input_batch)
                                     scores = torch.softmax(output, dim=1)[:, 1].tolist()
                                     frame_scores.extend(scores)
                             
@@ -228,29 +224,44 @@ if uploaded_files:
                             visual_penalty = 0.0
                             details_list = []
                             
-                            # กฎที่ 1: สัดส่วน (คงกฎเดิมที่อนุโลมอาหมาหมาแมวแล้ว)
+                            # ==========================================
+                            # 💡 กฎที่ 1: สัดส่วนมือต่อสินค้า (Dynamic Proportion)
+                            # ==========================================
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 500 and o_area > 500:
-                                    if (s_area / o_area) > 1.8: 
+                                    # แยกเกณฑ์: ถ้าของชิ้นใหญ่มาก > 15000 พิกเซล ให้อนุโลมมือ 1.8 เท่า
+                                    # แต่ถ้าของชิ้นปกติ (เหมือนในคลิปรีวิวชั้นวาง) บังคับเข้มงวดที่ 0.85 (85%)
+                                    limit_ratio = 1.8 if o_area > 15000 else 0.85
+                                    if (s_area / o_area) > limit_ratio: 
                                         miniature_frames += 1
                                         
-                            if miniature_frames >= 2:
+                            if miniature_frames >= 3:
                                 visual_penalty += 85.0 
-                                details_list.append("⛔ สเกลสินค้าหลอกตา (สัดส่วนมือใหญ่ผิดปกติ)")
+                                details_list.append("⛔ สเกลสินค้าหลอกตา/ของจิ๋ว (มือบังมิดสินค้าผิดปกติ)")
                             
-                            # กฎที่ 2: ความนิ่ง
+                            # ==========================================
+                            # 💡 กฎที่ 2: ความคงที่ของรูปทรง (Dynamic Stability)
+                            # ==========================================
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
-                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= 0.75)
+                                is_large_object = median_obj > 15000
+                                
+                                # แยกเกณฑ์ความนิ่ง: ของปกติบังคับ 60% / ของใหญ่มากอนุโลม 40%
+                                pass_percent = 40.0 if is_large_object else 60.0
+                                tolerance = 0.75 if is_large_object else 0.50
+                                
+                                stable_frames = sum(1 for a in valid_obj if abs(a - median_obj) / median_obj <= tolerance)
                                 stability_percent = (stable_frames / len(valid_obj)) * 100.0
                                 
-                                if stability_percent <= 40.0:
+                                if stability_percent <= pass_percent:
                                     visual_penalty += 65.0
-                                    details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด")
+                                    details_list.append(f"⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (สเกลคงที่ <{int(pass_percent)}%)")
                             
-                            # กฎที่ 3: ภาพละลาย
+                            # ==========================================
+                            # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง (AI Melt) - ดึงเกณฑ์โหดกลับมา
+                            # ==========================================
                             severe_streak = 0
                             max_severe_streak = 0
                             for s in frame_scores:
@@ -260,12 +271,12 @@ if uploaded_files:
                                 else:
                                     severe_streak = 0
                                     
-                            if max_severe_streak >= 6:
+                            if max_severe_streak >= 12:
                                 visual_penalty += 68.0 
-                                details_list.append("⛔ ภาพละลาย/บิดเบี้ยวต่อเนื่อง")
-                            elif max_severe_streak >= 3: 
+                                details_list.append("⛔ ภาพละลาย/อวัยวะบิดเบี้ยวต่อเนื่องเกิน 2 วินาที")
+                            elif max_severe_streak >= 5: 
                                 visual_penalty += 12.0
-                                details_list.append("ภาพบิดเบี้ยวช่วงสั้น (อนุโลม)")
+                                details_list.append("ภาพบิดเบี้ยวช่วงสั้น ~1 วิ (อนุโลม)")
                                 
                             # กฎที่ 4: เสียง
                             audio_penalty, audio_msgs = analyze_audio_strict(video_path)
@@ -296,14 +307,13 @@ if uploaded_files:
                         if os.path.exists(video_path): os.unlink(video_path)
                         if 'frames' in locals(): del frames
                         if 'frame_scores' in locals(): del frame_scores
-                        # 🚀 ลบตัวแปร Batch ทิ้งหลังใช้เสร็จ เพื่อคืน RAM ให้เซิร์ฟเวอร์
                         if 'input_batch' in locals(): del input_batch 
                         
                         gc.collect() 
                         if torch.cuda.is_available(): 
                             torch.cuda.empty_cache()
                             torch.cuda.ipc_collect()
-                        time.sleep(0.2) # 💡 ลดเวลาพักตรงนี้ลงจาก 0.5 เหลือ 0.2 เพื่อให้รันคลิปต่อไปไวขึ้น
+                        time.sleep(0.2) 
                     
                     results_summary.append({
                         "ลำดับ": idx + 1,
