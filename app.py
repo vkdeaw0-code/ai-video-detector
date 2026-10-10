@@ -22,10 +22,10 @@ np.random.seed(42)
 # 1. ตั้งค่าหน้าเว็บและการจัดการทรัพยากร
 # ==========================================
 st.set_page_config(page_title="AI Video Inspector Ultimate", page_icon="⚖️", layout="wide")
-st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate - Scale & Proportion)")
+st.title("⚖️ ระบบคัดกรองคลิป AI (Ultimate - Strict 70%)")
 st.markdown("""
-**เกณฑ์ตัดสิน: ความเสี่ยง ≥ 76% คือ ไม่ผ่าน (REJECT)**
-*   📏 **Proportion Logic:** หากสเกลหลอกตา (มือใหญ่เทียบเท่าสินค้า/ไม่สัมพันธ์กับคำพูด) = **ตัดตกทันที 100%**
+**เกณฑ์ตัดสิน: ความเสี่ยง ≥ 70% คือ ไม่ผ่าน (REJECT)**
+*   📏 **Proportion Logic:** แยกแยะสินค้าตั้งโต๊ะ (ผ่าน) ออกจาก สินค้าสเกลหลอกตา/ของเล่นจิ๋ว (ตก)
 *   📦 **Scale Stability:** สเกลคนและสินค้าต้องถูกต้องคงที่ **> 60% ของคลิป**
 *   👁️ **AI Melt:** ตัดตกเฉพาะกรณีอวัยวะ/สินค้าละลายพังต่อเนื่องเกิน **2 วินาที**
 *   👂 **Audio Strict:** ตัดตกหากพบเสียงหุ่นยนต์แบนราบ หรืออ่านสะดุด/เพี้ยนเกิน **2 คำ**
@@ -34,7 +34,6 @@ st.markdown("""
 @st.cache_resource
 def load_vision_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # ใช้ EfficientNet-b0 เป็นฐานสกัด Feature ความผิดปกติ
     model = timm.create_model('efficientnet_b0', pretrained=True, num_classes=2)
     model = model.to(device)
     model.eval()
@@ -61,7 +60,6 @@ def process_video_advanced(video_path, target_fps=6):
     skin_areas = []
     obj_areas = []
     
-    # ช่วงสีผิวสำหรับแยกคน/มือ ออกจากสินค้า
     lower_skin = np.array([0, 20, 70], dtype=np.uint8)
     upper_skin = np.array([20, 255, 255], dtype=np.uint8)
     
@@ -107,7 +105,6 @@ def process_video_advanced(video_path, target_fps=6):
 # 3. เครื่องยนต์วิเคราะห์เสียงขั้นสูง (Audio Glitch Engine)
 # ==========================================
 def analyze_audio_strict(video_path):
-    # 💡 แก้ปัญหาไฟล์ทับซ้อน สร้างแล้วปิดไฟล์ Temp ทันทีให้ FFmpeg เขียนทับได้สมบูรณ์
     with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_aud:
         audio_path = tmp_aud.name
 
@@ -182,7 +179,10 @@ if uploaded_files:
         
         results_summary = []
         cols = st.columns(3)
-        REJECT_THRESHOLD = 76.0
+        
+        # 💡 ปรับเกณฑ์ตัดสินใจตัดตกเป็น 70% ตามที่ต้องการ
+        REJECT_THRESHOLD = 70.0
+        
         progress_bar = st.progress(0)
         
         for idx, uploaded_file in enumerate(uploaded_files):
@@ -192,12 +192,11 @@ if uploaded_files:
                     d_name = f"{uploaded_file.name[:20]}..." if len(uploaded_file.name) > 20 else uploaded_file.name
                     st.markdown(f"**🎬 {idx+1}. {d_name}**")
                     
-                    # 💡 Reset pointer และสั่ง .close() ให้ไฟล์สมบูรณ์ 100% ก่อนประมวลผล
                     uploaded_file.seek(0)
                     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
                     tfile.write(uploaded_file.read())
                     tfile.flush()
-                    tfile.close() # สำคัญมาก! ต้องปิดก่อนให้ cv2 อ่าน
+                    tfile.close() 
                     video_path = tfile.name
                     
                     status, details = "ERROR", ""
@@ -223,10 +222,7 @@ if uploaded_files:
                             visual_penalty = 0.0
                             details_list = []
                             
-                            # ==========================================
                             # 💡 กฎที่ 1: สัดส่วนมือต่อสินค้า (Hand-to-Object Ratio)
-                            # ปรับแก้ความเด็ดขาด หากจับได้ว่าสเกลเพี้ยน = ตัดตก 100% ทันที
-                            # ==========================================
                             miniature_frames = 0
                             for s_area, o_area in zip(skin_areas, obj_areas):
                                 if s_area > 500 and o_area > 500:
@@ -234,12 +230,10 @@ if uploaded_files:
                                         miniature_frames += 1
                                         
                             if miniature_frames >= 3:
-                                visual_penalty += 85.0  # 🔥 ปรับเพิ่มเป็น 85.0 เพื่อบังคับให้คะแนนรวมพุ่งทะลุ 76% เสมอ
-                                details_list.append("⛔ สเกลสินค้าหลอกตา/ไม่สัมพันธ์กับสินค้าจริง (ตัดตกทันที)")
+                                visual_penalty += 85.0 
+                                details_list.append("⛔ สเกลสินค้าหลอกตา (มือมีขนาดใหญ่เทียบเท่าสินค้าหลัก)")
                             
-                            # ==========================================
                             # 💡 กฎที่ 2: ความคงที่ของรูปทรง > 60% (Stability)
-                            # ==========================================
                             valid_obj = [a for a in obj_areas if a > 300]
                             if valid_obj:
                                 median_obj = np.median(valid_obj)
@@ -250,9 +244,7 @@ if uploaded_files:
                                     visual_penalty += 65.0
                                     details_list.append("⛔ โครงสร้างสินค้ากลายร่าง/ยืดหด (สเกลคงที่ <60%)")
                             
-                            # ==========================================
                             # 💡 กฎที่ 3: ภาพละลายต่อเนื่อง 2 วินาที (Melting Rule)
-                            # ==========================================
                             severe_streak = 0
                             max_severe_streak = 0
                             for s in frame_scores:
@@ -269,9 +261,7 @@ if uploaded_files:
                                 visual_penalty += 12.0
                                 details_list.append("ภาพบิดเบี้ยวช่วงสั้น ~1 วิ (อนุโลม)")
                                 
-                            # ==========================================
                             # 💡 กฎที่ 4: วิเคราะห์เสียง
-                            # ==========================================
                             audio_penalty, audio_msgs = analyze_audio_strict(video_path)
                             if audio_msgs: details_list.extend(audio_msgs)
                             
@@ -298,7 +288,6 @@ if uploaded_files:
                     except Exception as e:
                         st.caption(f"⚠️ Error เกิดข้อผิดพลาดทางระบบ: {str(e)}")
                     finally:
-                        # 💡 กลไกการคืนหน่วยความจำและลดภาระระบบ (Memory Optimization)
                         if os.path.exists(video_path): os.unlink(video_path)
                         if 'frames' in locals(): del frames
                         if 'frame_scores' in locals(): del frame_scores
@@ -308,7 +297,7 @@ if uploaded_files:
                             torch.cuda.empty_cache()
                             torch.cuda.ipc_collect()
                             
-                        # หน่วงเวลา 2 วินาที ให้ระบบเคลียร์ไฟล์ขยะเสร็จสมบูรณ์ก่อนเริ่มคลิปใหม่
+                        # หน่วงเวลา 2 วินาที
                         time.sleep(2)
                     
                     results_summary.append({
@@ -330,8 +319,8 @@ if uploaded_files:
         
         m1, m2, m3 = st.columns(3)
         m1.metric("จำนวนคลิปทั้งหมด", f"{len(df_all)} คลิป")
-        m2.metric("✅ ผ่าน (< 76%)", f"{len(df_all[df_all['สถานะ'] == 'PASS'])} คลิป")
-        m3.metric("❌ ไม่ผ่าน (≥ 76%)", f"{len(df_all[df_all['สถานะ'] == 'REJECT'])} คลิป")
+        m2.metric("✅ ผ่าน (< 70%)", f"{len(df_all[df_all['สถานะ'] == 'PASS'])} คลิป")
+        m3.metric("❌ ไม่ผ่าน (≥ 70%)", f"{len(df_all[df_all['สถานะ'] == 'REJECT'])} คลิป")
         
         st.write("---")
         tab1, tab2 = st.tabs(["✅ คลิปที่ผ่านการคัดกรอง", "❌ คลิปที่ไม่ผ่าน (ถูกปัดตก)"])
