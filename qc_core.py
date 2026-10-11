@@ -1543,3 +1543,171 @@ def inspect(
     )
 
     return result
+
+# =============================================================
+# V3 SCALE DECEPTION GUARD v2
+# วางโค้ดชุดนี้ท้ายสุดของ qc_core.py
+# ไม่เปลี่ยนการตรวจเสียงหรือจำนวนครั้งที่เรียก Gemini
+# =============================================================
+
+ENGINE_VERSION = "v3-thai-speech-strict-scale-v2-20261011"
+
+PROMPT += """
+
+[IMPORTANT OVERRIDE — SCALE DECEPTION GUARD V2]
+These instructions REPLACE the earlier scale decision rules only.
+Keep the previous lenient Thai speech rules unchanged.
+
+ตรวจสเกลสินค้าทุกประเภทคลิป รวม HUMAN, HANDS, PRODUCT, MIXED
+อย่ามองว่าภาพคมชัดหรือสินค้าหน้าตาสวย แปลว่าใช้งานจริงได้
+
+ต้องตรวจจากหลักฐานอิสระ 3 ด้าน:
+1. HAND: เทียบขนาดสินค้ากับมือ นิ้ว แขน ขณะที่สัมผัสหรือชี้
+2. ENVIRONMENT: เทียบกับโต๊ะ ชั้นวาง บรรจุภัณฑ์ คน และสิ่งของรอบตัว
+3. FUNCTION: ขนาดเหมาะกับวัตถุประสงค์การใช้งานของสินค้านั้นจริงหรือไม่
+
+ตัวอย่างที่ต้องระวัง ไม่ใช่รายการสำหรับตัดสินแบบอัตโนมัติ:
+- แป้นบาสที่นำเสนอสำหรับใช้งานจริงแต่เล็กเพียงของตั้งโต๊ะ
+- เครื่องครัว/หม้อ/เครื่องใช้ไฟฟ้าที่ดูคล้ายโมเดลจิ๋วเทียบกับมือ
+- ถังขยะมีล้อสำหรับใช้งานบ้าน/อาคารแต่เล็กเกินจะใช้งานตามที่โฆษณา
+- ชั้นวางของหรืออุปกรณ์ที่เล็กเกินความจุ/หน้าที่ที่อ้างไว้
+- โคมไฟที่นำเสนอเป็นรุ่นติดตั้งจริงแต่แสดงสเกลเหมือนของจำลอง
+ใช้แนวคิดเดียวกันกับสินค้าทุกประเภท แม้ไม่ได้อยู่ในตัวอย่างข้างบน
+
+ถ้าเห็นว่าเล็กหรือใหญ่ผิดมากเมื่อเทียบกับมือและสิ่งแวดล้อม
+และขัดกับหน้าที่ของสินค้าที่นำเสนอ ให้ size_grade=wrong_scale
+ห้ามให้ PASS เพราะรูปร่างดูเนียน หากมีหลักฐานชัดเจนตั้งแต่ 2 ด้านขึ้นไป
+ต้องอธิบายความไม่สมเหตุสมผลจากภาพจริง ไม่ใช่เดาความยาวเป็นเซนติเมตร
+
+ตรวจการเคลื่อนไหวหลายช่วง: สินค้าชิ้นเดียวกันหด/ขยายสัดส่วน
+หรือเปลี่ยนโครงสร้างแบบเป็นไปไม่ได้หรือไม่ เช่น ชั้นวางใหญ่ขึ้นโดยไม่มี
+กลไกกาง/ปรับขนาดที่อธิบายได้ หากพบให้ temporal_scale_change=true
+และอธิบาย 2 ช่วงเวลาที่เทียบกัน แต่การพับ/กางชั้นตามกลไกปกติไม่ผิด
+
+ข้อยกเว้นสำคัญ: สินค้าจิ๋วอาจขายเป็นของเล่น โต๊ะจำลอง โมเดล
+หรือรุ่น MINI ที่ใช้งานได้จริงตามจุดประสงค์ของมัน
+หากมีคำพูดหรือป้ายระบุชัดว่าเป็นแบบจิ๋ว/ของเล่น/โมเดล ให้
+miniature_disclosed=true และใส่ข้อความยืนยันใน explicit_mini_evidence_th
+ห้ามสมมติว่า 'ตั้งใจจิ๋ว' เพียงเพราะเห็นว่าสินค้าเล็ก
+หากอ้างว่าเป็นสินค้าขนาดปกติแล้วเห็นเล็กผิดมากให้ FAIL
+
+หากมีแค่มุมกล้อง ซูม ภาพเบลอ หรือหลักฐานด้านเดียว
+ไม่เพียงพอสรุปว่าสเกลหลอก ให้ suspicious / unknown ไม่ใช่ wrong_scale
+
+ต้องกรอก key เหล่านี้ใน scale_review เพิ่มจาก schema เดิมด้วย:
+"hand_evidence_th": "ความผิดสเกลที่สังเกตเทียบมือจริง หรือสตริงว่าง",
+"environment_evidence_th": "ความผิดสเกลเทียบวัตถุในฉากจริง หรือสตริงว่าง",
+"usage_evidence_th": "ความขัดแย้งกับการใช้งานจริง หรือสตริงว่าง",
+"explicit_mini_evidence_th": "คำพูด/ข้อความที่ยืนยันว่าเป็นสินค้ามินิ หรือสตริงว่าง",
+"temporal_scale_change": false,
+"temporal_evidence_th": "หลักฐานเวลาสองช่วงเมื่อสินค้าขยาย/หดผิดธรรมชาติ หรือสตริงว่าง"
+
+ใช้ scale_review.confidence แทนความมั่นใจว่ามีปัญหาสเกลจริง
+หากหลักฐานชัดหลายด้านให้รายงานอย่างตรงไปตรงมา
+ห้ามแต่งหลักฐานให้ครบเงื่อนไข
+"""
+
+
+def apply_scale_rule(report):
+    """Override model PASS only for a well-supported severe scale error.
+
+    Does not modify the Thai audio judgement, FFmpeg, number of frames,
+    or number of Gemini requests. Still depends on model evidence.
+    """
+    result = dict(report)
+    scale = result.get("scale_review")
+    if not isinstance(scale, dict):
+        scale = {}
+    result["scale_review"] = scale
+    result["scale_override"] = False
+
+    def evidence(field):
+        x = scale.get(field, "")
+        return x.strip() if isinstance(x, str) else ""
+
+    def strong_evidence(field):
+        x = evidence(field)
+        if len(x) < 12:
+            return ""
+        if x.startswith((
+            "ไม่พบ", "ไม่มี", "ปกติ", "ไม่แน่ใจ", "ไม่ชัด", "ไม่สามารถยืนยัน"
+        )):
+            return ""
+        return x
+
+    try:
+        conf = float(scale.get("confidence", 0) or 0)
+    except (ValueError, TypeError):
+        conf = 0.0
+    if not math.isfinite(conf):
+        conf = 0.0
+
+    # Exempt genuine mini products only with explicit evidence.
+    confirmed_mini = (
+        _as_bool(scale.get("miniature_disclosed"))
+        and len(strong_evidence("explicit_mini_evidence_th")) >= 8
+    )
+
+    # Independent anchors: hand, environment, intended usage.
+    hand = strong_evidence("hand_evidence_th")
+    environment = strong_evidence("environment_evidence_th")
+    visual = strong_evidence("visual_evidence_th")
+    usage = strong_evidence("usage_evidence_th")
+
+    if not hand and not environment and visual:
+        hand = visual
+
+    anchors = sum(bool(x) for x in (hand, environment, usage))
+
+    wrong_scale = (
+        not confirmed_mini
+        and str(scale.get("size_grade", "")).lower() == "wrong_scale"
+        and conf >= 0.75
+        and anchors >= 2
+        and bool(visual or hand or environment)
+    )
+
+    # Do not confuse an ordinary folding mechanism with morphing.
+    impossible_morph = (
+        _as_bool(scale.get("temporal_scale_change"))
+        and conf >= 0.84
+        and len(strong_evidence("temporal_evidence_th")) >= 16
+    )
+
+    if not (wrong_scale or impossible_morph):
+        return result
+
+    if impossible_morph:
+        explanation = (
+            "สินค้าเปลี่ยนสเกลหรือโครงสร้างระหว่างคลิปผิดธรรมชาติ: "
+            + evidence("temporal_evidence_th")
+        )
+    else:
+        explanation = (
+            "ขนาดสินค้าไม่สมเหตุสมผลเมื่อเทียบกับมือ/ฉาก/การใช้งาน: "
+            + (evidence("reason_th") or "; ".join(
+                x for x in (hand, environment, usage) if x
+            ))
+        )
+
+    result["scale_override"] = result.get("decision") == "PASS"
+    result["decision"] = "FAIL"
+
+    previous = str(result.get("reason_th") or "").strip()
+    if previous and previous != explanation:
+        explanation = explanation + " | " + previous
+
+    result["reason_th"] = explanation[:850]
+
+    issues = result.get("issues")
+    issues = list(issues) if isinstance(issues, list) else []
+
+    issues.append({
+        "time_sec": 0.0,
+        "category": "product_scale",
+        "severity": "critical",
+        "detail_th": explanation[:600],
+    })
+
+    result["issues"] = issues[:25]
+    return result
