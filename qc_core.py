@@ -1,5 +1,9 @@
 
-"""Video quality analysis. FFmpeg/Pillow + Gemini REST (no paid SDK)."""
+"""AI Video QC — Product Scale Guard V2.
+
+Analyzes sampled frames and audio with Gemini.
+Compatible with Batch Manager V3.
+"""
 from __future__ import annotations
 
 import base64
@@ -10,69 +14,324 @@ import subprocess
 import tempfile
 import time
 import wave
+
 from array import array
 from pathlib import Path
 
 import requests
-from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageStat
 
-ENGINE_VERSION = "2026-10-11-v1"
-FPS = {"Fast": 1, "Balanced": 2, "Deep": 3}
+from PIL import (
+    Image,
+    ImageChops,
+    ImageDraw,
+    ImageOps,
+    ImageStat,
+)
+
+# เปลี่ยนเวอร์ชันเมื่อแก้เกณฑ์ตรวจ
+# เพื่อไม่ให้ Cache ใช้คำตัดสินเดิม
+ENGINE_VERSION = "2026-10-11-product-scale-v2"
+
+FPS = {
+    "Fast": 1,
+    "Balanced": 2,
+    "Deep": 3,
+}
+
 ALLOWED_MODELS = {
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite",
 }
 
-PROMPT = """คุณเป็นผู้ตรวจคุณภาพวิดีโอโฆษณาสินค้าที่สร้างด้วย AI
-วัตถุประสงค์: คัดคลิปที่ใช้โฆษณาได้จริง ไม่ใช่จับผิดว่าเป็น AI หรือไม่
-คลิปมีความยาวประมาณ 10 วินาที ภาพที่ส่งให้เป็น contact sheet เรียงตามเวลา (แต่ละภาพมีป้ายเวลา) และอาจมีเสียงต้นฉบับ
 
-จงจำแนกประเภท:
-คนขายสินค้า (HUMAN)
-มือพรีเซนสินค้า (HANDS)
-สินค้าอย่างเดียว (PRODUCT)
-หรือสลับประเภท (MIXED)
+PROMPT = """
+คุณเป็นหัวหน้าฝ่ายตรวจคุณภาพวิดีโอสินค้า AI
+(Thai advertising video quality inspector)
 
-ตรวจอย่างมีเหตุผลตามสิ่งที่มองเห็นหรือได้ยินจริง:
-ใบหน้า รูปร่าง มือ/นิ้ว การจับสินค้า ขนาดและรูปทรงสินค้า
-สี โลโก้และฉลากเมื่ออ่านได้ การเปลี่ยนรูปร่างระหว่างช่วง
-การเคลื่อนไหว ฉาก เสียงภาษาไทย เสียงแตก/สะดุด
-และความสัมพันธ์ของคำพูดกับสินค้าหากมีเสียง
+เป้าหมาย:
+PASS สำหรับคลิปที่ดูดีและแสดงสินค้าตรงกับ
+ชนิดสินค้า การใช้งาน และคำบรรยาย
 
-อย่าคิดว่าการเปลี่ยนมุมกล้องหรือซูมเป็นขนาดสินค้าเพี้ยน
-อย่าตัดตกเพราะเป็น AI หรือเพราะข้อผิดพลาดเล็กมากจนไม่รบกวนการดู
+FAIL สำหรับคลิปที่พบความผิดพลาดสำคัญ
 
-ตัดสิน FAIL ก็ต่อเมื่อมีข้อบกพร่องชัดเจนระดับส่งผลต่อคุณภาพโฆษณา
-เช่น มือผิดรูปชัด สินค้าเปลี่ยนรูปร่างผิดปกติ
-เสียงขาด/ผิดเพี้ยนจนรบกวน การเคลื่อนไหวพัง
+วิดีโอมีความยาวประมาณ 10 วินาที
+ได้รับภาพตามลำดับเวลา เฟรมเดี่ยว
+และอาจมีเสียงจริงจากวิดีโอ
 
-หากคลิปโดยรวมดูดี ให้ PASS
-ถ้าไม่มีคน ห้ามอ้างว่าปากไม่ตรงเสียง
-ถ้าไม่มีเสียง ห้ามบอกว่าเสียงผิด
-ถ้าข้อมูลไม่พอ อย่าแต่งเหตุผล
+ต้องวิเคราะห์จากหลักฐานที่เห็นหรือได้ยินจริง
+ห้ามตอบ PASS เพียงเพราะภาพดูสวย
 
-การวิเคราะห์ temporal จาก contact sheet เป็นการประมาณ
-ไม่สามารถยืนยันเหตุการณ์ระหว่างเฟรมที่ไม่ได้เห็น
+================================
+ขั้นที่ 1 จำแนกประเภทวิดีโอ
+================================
 
-คืน JSON เท่านั้น โดยใช้ฟิลด์ต่อไปนี้:
+ระบุสินค้าหลักที่ผู้ขายกำลังเสนอ
+อย่านำสินค้าประกอบฉากด้านหลังมาเป็นสินค้าหลัก
+
+HUMAN:
+มีคนขายเต็มตัวหรือเห็นหน้าผู้ขายพูด
+
+HANDS:
+มีมือหรือแขนพรีเซนสินค้า
+แต่ไม่เห็นคนขายเต็มตัว
+
+PRODUCT:
+แสดงสินค้าอย่างเดียว
+
+MIXED:
+สลับระหว่างหลายประเภท
+
+================================
+ขั้นที่ 2 ตรวจสอบเสียงและคำพูด
+================================
+
+ฟังเสียงจากวิดีโอและตรวจ:
+
+- ชื่อสินค้าที่กล่าวถึง
+- ขนาดสินค้า
+- การใช้งานสินค้า
+- ความจุ
+- จำนวนชั้น
+- วัตถุประสงค์การใช้งาน
+- เสียงขาด
+- เสียงพูดแตก
+- เสียงพูดเพี้ยน
+- คำพูดภาษาไทยที่ไม่สมเหตุสมผล
+
+หากได้ยินไม่ชัด
+ให้ระบุว่าไม่แน่ใจ
+
+ห้ามแต่งคำพูดขึ้นเอง
+
+================================
+ขั้นที่ 3 PRODUCT SCALE AUDIT
+================================
+
+ใช้กับ HANDS, PRODUCT และ MIXED
+
+ต้องตรวจสเกลสินค้าอย่างจริงจัง
+
+ตรวจสอบ:
+
+1. สินค้าประเภทอะไร
+2. สินค้ามีไว้ใช้ทำอะไร
+3. สินค้าที่เห็นมีขนาดสมเหตุสมผลหรือไม่
+4. สินค้ามีขนาดเหมาะกับการใช้งานที่กล่าวอ้างหรือไม่
+5. ขนาดเทียบกับมือและนิ้วเป็นอย่างไร
+6. ขนาดเทียบกับวัตถุรอบข้างเป็นอย่างไร
+7. สินค้าเหมือนแบบจำลองขนาดเล็กหรือไม่
+8. สินค้าเล็กเกินกว่าจะใช้งานตามคำพูดหรือไม่
+9. สินค้าบิดเบี้ยวหรือเปลี่ยนขนาดผิดปกติหรือไม่
+10. สินค้าตรงกับประเภทที่โฆษณาหรือไม่
+
+ให้เปรียบเทียบกับวัตถุอ้างอิง เช่น
+
+- มือ
+- นิ้ว
+- กระป๋องอาหาร
+- ขวดน้ำ
+- อุปกรณ์ครัว
+- โต๊ะ
+- พื้น
+- ชั้นวางของ
+- วัตถุอื่นที่เห็นชัด
+
+ตัวอย่างความผิดพลาดสำคัญ:
+
+ชั้นวางของที่อ้างว่าใช้เก็บสิ่งของขนาดปกติ
+แต่มีสัดส่วนเล็กเหมือนแบบจำลอง
+และไม่มีพื้นที่เพียงพอสำหรับการใช้งานนั้น
+
+ถังขยะสำหรับใช้งานทั่วไป
+แต่มีขนาดเล็กผิดบริบทเมื่อเทียบกับมือ
+และขัดกับคำบรรยาย
+
+อุปกรณ์ครัวที่อ้างว่าใช้กับเครื่องใช้ขนาดปกติ
+แต่สินค้าเล็กเกินกว่าจะรองรับเครื่องใช้เหล่านั้น
+
+แม้สินค้าดูเนียน สวย และไม่บิดเบี้ยว
+แต่ผิดสเกลการใช้งานอย่างชัดเจน
+ให้ FAIL
+
+แม้สินค้าไม่เปลี่ยนขนาดตลอดคลิป
+ก็อาจผิดสเกลการใช้งานได้
+
+ต้องอธิบายหลักฐานอย่างชัดเจน
+
+================================
+ข้อควรระวังเรื่องสินค้า MINI
+================================
+
+สินค้าบางอย่างถูกออกแบบมาให้เล็กจริง เช่น
+
+- ของเล่น
+- สินค้ามินิ
+- อุปกรณ์ตั้งโต๊ะ
+- ชั้นวางขนาดเล็ก
+- สินค้าจำลอง
+- ห่วงบาสตั้งโต๊ะ
+
+ถ้าเป็นรุ่นเล็กโดยตั้งใจ
+และโฆษณาตรงกับชนิดสินค้า
+ห้าม FAIL เพียงเพราะเล็ก
+
+ต้องระวังการซูมภาพ
+ระยะกล้อง และมุม Perspective
+
+ห้ามสรุปจากการที่สินค้า
+กินพื้นที่ในภาพน้อยเพียงอย่างเดียว
+
+ถ้าหลักฐานไม่เพียงพอ
+ห้ามเดาขนาดจริงขึ้นเอง
+
+================================
+ขั้นที่ 4 ตรวจคลิป HUMAN
+================================
+
+หากมีคนยืนขายสินค้า
+
+เน้นตรวจเฉพาะ:
+
+- สินค้าหลักที่คนถือ
+- สินค้าที่อยู่ตรงกลาง
+- รูปทรงสินค้า
+- สินค้าบิดเบี้ยวหรือไม่
+- สินค้าเปลี่ยนรูปร่างหรือไม่
+- มือที่จับสินค้าผิดรูปหรือไม่
+- สินค้าทะลุมือหรือไม่
+- การเคลื่อนไหวของสินค้า
+- เสียงพูดผิดเพี้ยนหรือไม่
+- ปากและเสียงตรงกันหรือไม่เมื่อมองเห็นชัด
+
+อย่าจับผิดฉากหลังหรือรายละเอียดเล็กน้อย
+ที่ไม่กระทบคุณภาพโฆษณา
+
+หากสินค้าและเสียงดูดี
+และไม่มีความผิดพลาดสำคัญ
+ให้ PASS
+
+================================
+ขั้นที่ 5 ตรวจคุณภาพเพิ่มเติม
+================================
+
+ตรวจสอบ:
+
+- Product Geometry
+- Product Scale
+- Product Identity
+- Product Continuity
+- Hand Consistency
+- Object Interaction
+- Motion Continuity
+- Audio Distortion
+- Thai Speech Quality
+- Advertising Usability
+
+ไม่ต้อง FAIL จากข้อผิดพลาดเล็กน้อย
+ที่คนดูทั่วไปไม่สังเกต
+
+================================
+ขั้นที่ 6 ตัดสินผล
+================================
+
+PASS:
+คุณภาพดี ใช้โฆษณาได้
+สินค้าและคำพูดสอดคล้องกัน
+ไม่มีข้อผิดพลาดสำคัญ
+
+FAIL:
+มีข้อผิดพลาดสำคัญ เช่น
+
+1. สินค้าเล็กผิดประเภทอย่างชัดเจน
+2. สินค้าขัดกับการใช้งานที่โฆษณา
+3. สินค้าเปลี่ยนรูปทรงผิดธรรมชาติ
+4. มือผิดรูปอย่างชัดเจน
+5. เสียงแตกหรือขาดจนรบกวน
+6. การเคลื่อนไหวผิดปกติอย่างรุนแรง
+
+สำหรับการตัดสินผิดสเกล
+ต้องมีหลักฐานอย่างน้อยสองด้าน
+
+เช่น:
+ขนาดเทียบมือ + วัตถุประสงค์การใช้งาน
+
+หรือ:
+ภาพสินค้า + คำพูดที่ขัดแย้ง
+
+อย่าเดาจากมุมกล้องเพียงอย่างเดียว
+
+ห้ามอ้างสิ่งที่ไม่ได้เห็นในเฟรมตัวอย่าง
+ห้ามเดา Transcript หากเสียงไม่ชัด
+
+================================
+รูปแบบ JSON OUTPUT
+================================
+
+ตอบเป็น JSON object เท่านั้น
+ไม่มี Markdown
+
 {
- "decision": "PASS หรือ FAIL",
- "video_type": "HUMAN|HANDS|PRODUCT|MIXED",
- "reason_th": "เหตุผลสรุปสั้นภาษาไทย",
- "issues": [
-   {
-    "time_sec": 0.0,
-    "category": "person|hand|product|motion|audio|other",
-    "severity": "minor|moderate|critical",
-    "detail_th": "คำอธิบาย"
-   }
- ],
- "speech_summary_th": "สรุปคำพูดภาษาไทยถ้ามี ไม่ต้องเดาหากไม่มี"
+  "decision": "PASS",
+  "video_type": "HANDS",
+  "product_name_th": "ชื่อสินค้าหลัก",
+  "reason_th": "เหตุผลสั้นภาษาไทย",
+  "issues": [
+    {
+      "time_sec": 4.0,
+      "category": "product",
+      "severity": "critical",
+      "detail_th": "รายละเอียดข้อผิดพลาด"
+    }
+  ],
+  "speech_summary_th": "สรุปคำพูดที่ได้ยินจริง",
+  "scale_review": {
+    "size_grade": "normal",
+    "category_scale_mismatch": false,
+    "spoken_claim_conflict": false,
+    "miniature_disclosed": false,
+    "visual_evidence_th": "หลักฐานจากภาพ",
+    "usage_evidence_th": "หลักฐานด้านการใช้งาน",
+    "speech_evidence_th": "หลักฐานจากคำพูด",
+    "confidence": 0.0,
+    "reason_th": "สรุปเรื่องสเกล"
+  }
 }
 
-โปรดให้ time_sec อยู่ในช่วง 0 ถึงระยะเวลาคลิป
-และหลีกเลี่ยงการระบุวินาทีแม่นเกินกว่าที่ภาพตัวอย่างรองรับ
+scale_review.size_grade เลือกได้เฉพาะ:
+
+normal
+intentional_mini
+suspicious
+wrong_scale
+unknown
+
+wrong_scale:
+ใช้เมื่อมีหลักฐานชัดเจน
+
+suspicious:
+มีข้อสงสัยแต่ยังไม่มีหลักฐานเพียงพอ
+
+category_scale_mismatch:
+เป็น true เฉพาะสเกลที่ขัดกับชนิดสินค้า
+และวัตถุประสงค์อย่างชัดเจน
+
+spoken_claim_conflict:
+เป็น true เฉพาะเมื่อคำพูดที่ได้ยินจริง
+ขัดกับสิ่งที่เห็น
+
+miniature_disclosed:
+เป็น true หากระบุชัดว่า
+สินค้าถูกออกแบบมาเป็นมินิ
+ของเล่น ตั้งโต๊ะ หรือรุ่นเล็ก
+
+confidence:
+ตัวเลข 0 ถึง 1
+ใช้แสดงความมั่นใจว่าสเกลผิดจริง
+
+สำหรับ HUMAN:
+หากไม่ได้ตรวจสเกล
+ให้ระบุ size_grade=unknown
 """
 
 
@@ -84,7 +343,10 @@ class QuotaError(AnalysisError):
     pass
 
 
-def command(args: list[str], timeout: int = 90) -> subprocess.CompletedProcess:
+def command(
+    args: list[str],
+    timeout: int = 90,
+) -> subprocess.CompletedProcess:
     try:
         p = subprocess.run(
             args,
@@ -93,12 +355,15 @@ def command(args: list[str], timeout: int = 90) -> subprocess.CompletedProcess:
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         raise AnalysisError(
             f"FFmpeg/FFprobe ไม่พร้อมหรือหมดเวลา: {exc}"
         ) from exc
 
-    if p.returncode != 0:
+    if p.returncode:
         raise AnalysisError(
             (p.stderr or "FFmpeg ผิดพลาด")[-450:]
         )
@@ -107,31 +372,47 @@ def command(args: list[str], timeout: int = 90) -> subprocess.CompletedProcess:
 
 
 def probe(path: Path) -> dict:
-    data = json.loads(
-        command([
-            "ffprobe", "-v", "error",
-            "-show_entries",
-            "format=duration:stream=codec_type",
-            "-of", "json", str(path)
-        ]).stdout
-    )
+    try:
+        data = json.loads(
+            command([
+                "ffprobe",
+                "-v", "error",
+                "-show_entries",
+                "format=duration:stream=codec_type",
+                "-of", "json",
+                str(path),
+            ]).stdout
+        )
 
-    duration = float(
-        data.get("format", {}).get("duration", 0) or 0
-    )
+        duration = float(
+            data.get("format", {}).get(
+                "duration", 0
+            ) or 0
+        )
+
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise AnalysisError(
+            "อ่านข้อมูลระยะเวลาวิดีโอไม่ได้"
+        ) from exc
 
     streams = data.get("streams", [])
 
     if not any(
-        s.get("codec_type") == "video" for s in streams
+        s.get("codec_type") == "video"
+        for s in streams
     ):
         raise AnalysisError(
-            "ไม่มีแทร็กวิดีโอที่อ่านได้"
+            "ไม่พบแทร็กวิดีโอ"
         )
 
     if not 0.5 <= duration <= 25:
         raise AnalysisError(
-            f"รองรับคลิปประมาณ 10 วินาที "
+            "รองรับคลิปประมาณ 10 วินาที "
             f"(ไฟล์นี้ {duration:.1f} วินาที; "
             "จำกัด 0.5–25 วินาที)"
         )
@@ -150,12 +431,13 @@ def frames_from_video(
     folder: Path,
     fps: int,
 ) -> list[Path]:
-
     folder.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    # อ่านวิดีโอรอบเดียว
+    # ไม่โหลดทุกเฟรมเข้า RAM
     vf = (
         f"fps={fps},"
         "scale=640:640:"
@@ -175,16 +457,16 @@ def frames_from_video(
         str(folder / "f_%03d.jpg"),
     ], timeout=120)
 
-    result = sorted(
+    frames = sorted(
         folder.glob("f_*.jpg")
     )
 
-    if not result:
+    if not frames:
         raise AnalysisError(
-            "ไม่สามารถอ่านเฟรมวิดีโอได้"
+            "ดึงเฟรมไม่ได้"
         )
 
-    return result[:80]
+    return frames[:80]
 
 
 def motion_peaks(
@@ -192,49 +474,54 @@ def motion_peaks(
     fps: int,
     duration: float,
 ) -> list[float]:
-
-    # Rough changes, not proof of defects.
     changes = []
     previous = None
 
-    for index, path in enumerate(frames):
-        with Image.open(path) as im:
-            gray = ImageOps.grayscale(im).resize(
-                (48, 48)
-            )
+    for i, file in enumerate(frames):
+        with Image.open(file) as im:
+            small = ImageOps.grayscale(
+                im
+            ).resize((48, 48))
 
         if previous is not None:
-            score = ImageStat.Stat(
-                ImageChops.difference(
-                    gray, previous
-                )
+            difference = ImageChops.difference(
+                small,
+                previous,
+            )
+
+            amount = ImageStat.Stat(
+                difference
             ).mean[0]
 
-            if score > 48:
+            if amount > 45:
                 changes.append((
-                    score,
+                    amount,
                     min(
-                        duration - 0.1,
-                        index / fps
-                    )
+                        duration - 0.15,
+                        i / fps,
+                    ),
                 ))
 
-        previous = gray
+        previous = small
 
     changes.sort(reverse=True)
 
-    out = []
+    selected = []
 
     for _, t in changes:
-        if t > 0.2 and all(
-            abs(t - v) > 0.7 for v in out
+        if (
+            t >= 0.15
+            and all(
+                abs(t - other) > 0.8
+                for other in selected
+            )
         ):
-            out.append(t)
+            selected.append(t)
 
-        if len(out) == 2:
+        if len(selected) >= 2:
             break
 
-    return sorted(out)
+    return sorted(selected)
 
 
 def extra_frame(
@@ -242,7 +529,6 @@ def extra_frame(
     at: float,
     out: Path,
 ) -> bool:
-
     try:
         command([
             "ffmpeg",
@@ -260,7 +546,7 @@ def extra_frame(
             str(out),
         ], timeout=25)
 
-        return out.exists()
+        return out.is_file()
 
     except AnalysisError:
         return False
@@ -271,11 +557,12 @@ def contact_sheets(
     fps: int,
     folder: Path,
 ) -> list[Path]:
-
     result = []
 
     for start in range(
-        0, len(frames), 10
+        0,
+        len(frames),
+        10,
     ):
         sheet = Image.new(
             "RGB",
@@ -285,12 +572,12 @@ def contact_sheets(
 
         draw = ImageDraw.Draw(sheet)
 
-        for i, frame_path in enumerate(
+        for i, path in enumerate(
             frames[start:start + 10]
         ):
             index = start + i
 
-            with Image.open(frame_path) as im:
+            with Image.open(path) as im:
                 small = ImageOps.contain(
                     im.convert("RGB"),
                     (236, 245),
@@ -318,21 +605,43 @@ def contact_sheets(
                 fill="white",
             )
 
-        outfile = (
-            folder
-            / f"sheet_{len(result):02d}.jpg"
+        output = folder / (
+            f"sheet_{len(result):02d}.jpg"
         )
 
         sheet.save(
-            outfile,
+            output,
             "JPEG",
-            quality=78,
+            quality=82,
             optimize=True,
         )
 
-        result.append(outfile)
+        result.append(output)
 
     return result
+
+
+def inspect_frames(
+    frames: list[Path],
+    fps: int,
+) -> list[tuple[float, Path]]:
+    indexes = sorted(set(
+        round(
+            x * (len(frames) - 1)
+        )
+        for x in (
+            0.10,
+            0.32,
+            0.57,
+            0.80,
+            0.94,
+        )
+    ))
+
+    return [
+        (i / fps, frames[i])
+        for i in indexes
+    ]
 
 
 def extract_audio(
@@ -343,10 +652,10 @@ def extract_audio(
 
     if not has_audio:
         return None, {
-            "has_audio": False
+            "has_audio": False,
         }
 
-    wav_path = folder / "audio.wav"
+    audio = folder / "audio.wav"
 
     command([
         "ffmpeg",
@@ -359,47 +668,54 @@ def extract_audio(
         "-ac", "1",
         "-ar", "16000",
         "-c:a", "pcm_s16le",
-        str(wav_path),
+        str(audio),
     ], timeout=60)
 
     with wave.open(
-        str(wav_path), "rb"
+        str(audio),
+        "rb",
     ) as wav:
-
         if wav.getsampwidth() != 2:
             raise AnalysisError(
-                "รูปแบบเสียงที่แปลงมาไม่ถูกต้อง"
+                "รูปแบบเสียงไม่ถูกต้อง"
             )
 
-        values = array("h")
+        samples = array("h")
 
-        values.frombytes(
+        samples.frombytes(
             wav.readframes(
                 wav.getnframes()
             )
         )
 
-    if not values:
+    if not samples:
         return None, {
             "has_audio": True,
             "silent": True,
         }
 
     rms = math.sqrt(
-        sum(v * v for v in values)
-        / len(values)
+        sum(v * v for v in samples)
+        / len(samples)
     ) / 32768.0
 
-    clipped = sum(
+    clipped_ratio = sum(
         abs(v) >= 32300
-        for v in values
-    ) / len(values)
+        for v in samples
+    ) / len(samples)
 
-    return wav_path, {
+    if rms < 0.001:
+        return None, {
+            "has_audio": True,
+            "silent": True,
+            "rms": round(rms, 5),
+        }
+
+    return audio, {
         "has_audio": True,
         "rms": round(rms, 4),
         "clipped_ratio": round(
-            clipped, 4
+            clipped_ratio, 4
         ),
         "possibly_silent": rms < 0.002,
     }
@@ -409,15 +725,179 @@ def inline_part(
     path: Path,
     mime: str,
 ) -> dict:
+    data = base64.b64encode(
+        path.read_bytes()
+    ).decode("ascii")
 
     return {
         "inline_data": {
             "mime_type": mime,
-            "data": base64.b64encode(
-                path.read_bytes()
-            ).decode("ascii"),
+            "data": data,
         }
     }
+
+
+def _as_bool(value: object) -> bool:
+    return (
+        value is True
+        or (
+            isinstance(value, str)
+            and value.lower() == "true"
+        )
+    )
+
+
+def apply_scale_rule(report: dict) -> dict:
+    """
+    ใช้ตรวจคำตัดสินอีกชั้น
+
+    ถ้า Gemini ให้ PASS แต่มีหลักฐาน
+    ว่าสเกลผิดอย่างชัดเจน ให้เปลี่ยนเป็น FAIL
+    """
+    result = dict(report)
+
+    category = str(
+        result.get(
+            "video_type", ""
+        )
+    ).upper()
+
+    size = result.get(
+        "scale_review"
+    )
+
+    if not isinstance(size, dict):
+        size = {}
+
+    result["scale_review"] = size
+    result["scale_override"] = False
+
+    # คลิป HUMAN ใช้กฎภาพและเสียงทั่วไป
+    if category == "HUMAN":
+        return result
+
+    # ไม่ตัดตกสินค้า MINI ที่ระบุชัด
+    if _as_bool(
+        size.get("miniature_disclosed")
+    ):
+        return result
+
+    if category not in {
+        "HANDS",
+        "PRODUCT",
+        "MIXED",
+    }:
+        return result
+
+    grade = str(
+        size.get(
+            "size_grade", ""
+        )
+    ).lower()
+
+    if grade != "wrong_scale":
+        return result
+
+    try:
+        confidence = float(
+            size.get("confidence", 0)
+        )
+    except (TypeError, ValueError):
+        confidence = 0
+
+    if not math.isfinite(confidence):
+        confidence = 0
+
+    visual = str(
+        size.get(
+            "visual_evidence_th"
+        ) or ""
+    ).strip()
+
+    usage = str(
+        size.get(
+            "usage_evidence_th"
+        ) or ""
+    ).strip()
+
+    speech = str(
+        size.get(
+            "speech_evidence_th"
+        ) or ""
+    ).strip()
+
+    category_mismatch = _as_bool(
+        size.get(
+            "category_scale_mismatch"
+        )
+    )
+
+    spoken_mismatch = _as_bool(
+        size.get(
+            "spoken_claim_conflict"
+        )
+    )
+
+    # ต้องมีหลักฐานสองด้าน
+    confirmed = (
+        confidence >= 0.82
+        and bool(visual)
+        and (
+            (
+                category_mismatch
+                and bool(usage)
+            )
+            or (
+                spoken_mismatch
+                and bool(speech)
+            )
+        )
+    )
+
+    if not confirmed:
+        return result
+
+    result["scale_override"] = (
+        result.get("decision") == "PASS"
+    )
+
+    result["decision"] = "FAIL"
+
+    reason = str(
+        size.get(
+            "reason_th"
+        ) or ""
+    ).strip()
+
+    result["reason_th"] = (
+        "สเกลสินค้าไม่สอดคล้องกับ"
+        "ชนิด/การใช้งานหรือคำพูด: "
+        + (
+            reason[:340]
+            if reason
+            else visual[:250]
+        )
+    )
+
+    issues = result.get(
+        "issues"
+    )
+
+    if not isinstance(issues, list):
+        issues = []
+
+    issues = list(issues)
+
+    issues.append({
+        "time_sec": 0.0,
+        "category": "product",
+        "severity": "critical",
+        "detail_th": result["reason_th"],
+    })
+
+    result["issues"] = issues[:25]
+
+    return result
 
 
 def gemini_analyze(
@@ -432,42 +912,50 @@ def gemini_analyze(
 
     if model not in ALLOWED_MODELS:
         raise AnalysisError(
-            "โมเดลนี้ไม่ได้อยู่ในรายการที่แอปอนุญาต"
+            "ชื่อโมเดลไม่ได้อยู่ในรายการที่อนุญาต"
         )
 
     parts = [{
         "text": (
             PROMPT
-            + f"\nระยะเวลาคลิป: "
-            f"{duration:.2f} วินาที; "
-            f"สถิติเสียง: "
-            f"{json.dumps(audio_stats, ensure_ascii=False)}"
+            + "\nระยะเวลาคลิป="
+            + f"{duration:.2f}"
+            + " วินาที ข้อมูลเสียง="
+            + json.dumps(
+                audio_stats,
+                ensure_ascii=False,
+            )
         )
     }]
 
-    for sheet in sheets:
+    for p in sheets:
         parts.append({
-            "text": "ภาพตามลำดับเวลา (timeline):"
+            "text": (
+                "TIMELINE: ภาพหลายเวลา "
+                "ให้ดูความต่อเนื่องและขนาด"
+                "สัมพันธ์กับมือ/สิ่งของ"
+            )
         })
 
         parts.append(
             inline_part(
-                sheet,
+                p,
                 "image/jpeg",
             )
         )
 
-    for sec, image_file in details:
+    for sec, p in details:
         parts.append({
             "text": (
-                f"ภาพขยายช่วงประมาณ "
-                f"{sec:.2f} วินาที:"
+                "เฟรมเดี่ยวความละเอียดสูงกว่า "
+                f"ที่เวลาใกล้ {sec:.1f} วินาที "
+                "ตรวจอัตราส่วนเทียบมือและการใช้งาน"
             )
         })
 
         parts.append(
             inline_part(
-                image_file,
+                p,
                 "image/jpeg",
             )
         )
@@ -475,8 +963,9 @@ def gemini_analyze(
     if wav is not None:
         parts.append({
             "text": (
-                "เสียงจากคลิปเดียวกัน "
-                "ใช้ตรวจคำพูดภาษาไทยและคุณภาพเสียง:"
+                "เสียงจริงจากวิดีโอเดียวกัน "
+                "ให้ฟังคำอ้างขนาด/การใช้งาน "
+                "และความเพี้ยนของคำพูดภาษาไทย"
             )
         })
 
@@ -499,7 +988,7 @@ def gemini_analyze(
         }],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 1600,
+            "maxOutputTokens": 2200,
             "responseMimeType": "application/json",
         },
     }
@@ -529,8 +1018,8 @@ def gemini_analyze(
 
         if response.status_code == 429:
             raise QuotaError(
-                "Gemini API ถึงโควตาหรือจำกัดความถี่แล้ว "
-                "กรุณารอและกดเริ่มต่อ"
+                "Gemini API ถึงโควตาหรือจำกัดความถี่ "
+                "กรุณารอแล้วเริ่มต่อ"
             )
 
         if (
@@ -545,21 +1034,19 @@ def gemini_analyze(
 
         if response.status_code >= 400:
             try:
-                message = (
-                    response.json()
-                    .get("error", {})
-                    .get(
-                        "message",
-                        response.text[:300],
-                    )
+                msg = response.json().get(
+                    "error", {}
+                ).get(
+                    "message",
+                    response.text[:300],
                 )
             except ValueError:
-                message = response.text[:300]
+                msg = response.text[:300]
 
             raise AnalysisError(
                 f"Gemini HTTP "
                 f"{response.status_code}: "
-                f"{message[:350]}"
+                f"{str(msg)[:350]}"
             )
 
         try:
@@ -567,37 +1054,48 @@ def gemini_analyze(
 
             text = "".join(
                 p.get("text", "")
-                for p in obj["candidates"][0]
-                ["content"]["parts"]
+                for p in (
+                    obj["candidates"][0]
+                    ["content"]["parts"]
+                )
             )
 
-            text = re.sub(
+            raw = re.sub(
                 r"^```(?:json)?\s*|\s*```$",
                 "",
                 text.strip(),
             )
 
-            report = json.loads(text)
+            report = json.loads(raw)
+
+            if not isinstance(report, dict):
+                raise ValueError(
+                    "response is not a JSON object"
+                )
 
             decision = str(
-                report["decision"]
+                report.get(
+                    "decision", ""
+                )
             ).upper()
 
             kind = str(
-                report["video_type"]
+                report.get(
+                    "video_type", ""
+                )
             ).upper()
 
             if (
-                decision not in ("PASS", "FAIL")
-                or kind not in (
+                decision not in {"PASS", "FAIL"}
+                or kind not in {
                     "HUMAN",
                     "HANDS",
                     "PRODUCT",
                     "MIXED",
-                )
+                }
             ):
                 raise ValueError(
-                    "สถานะหรือประเภทวิดีโอไม่ถูกต้อง"
+                    "decision/video_type ไม่ถูกต้อง"
                 )
 
             if not isinstance(
@@ -608,30 +1106,69 @@ def gemini_analyze(
                     "issues ต้องเป็น list"
                 )
 
-            return {
+            # HANDS/PRODUCT/MIXED
+            # ต้องได้รับผลตรวจสเกล
+            if kind in {
+                "HANDS",
+                "PRODUCT",
+                "MIXED",
+            }:
+                review = report.get(
+                    "scale_review"
+                )
+
+                if (
+                    not isinstance(review, dict)
+                    or review.get("size_grade")
+                    not in {
+                        "normal",
+                        "intentional_mini",
+                        "suspicious",
+                        "wrong_scale",
+                        "unknown",
+                    }
+                ):
+                    raise ValueError(
+                        "ไม่ได้คืน scale_review ที่จำเป็น"
+                    )
+
+            clean = {
                 "decision": decision,
                 "video_type": kind,
-                "reason_th": (
-                    str(
-                        report.get(
-                            "reason_th", ""
-                        )
-                    )[:800]
-                    or "ไม่มีคำอธิบายจาก AI"
-                ),
+                "reason_th": str(
+                    report.get(
+                        "reason_th"
+                    ) or "ไม่มีเหตุผล"
+                )[:800],
+                "product_name_th": str(
+                    report.get(
+                        "product_name_th"
+                    ) or ""
+                )[:180],
                 "issues": [
-                    x for x in report.get(
+                    x
+                    for x in report.get(
                         "issues", []
                     )
                     if isinstance(x, dict)
-                ][:25],
+                ][:24],
                 "speech_summary_th": str(
                     report.get(
-                        "speech_summary_th", ""
-                    )
+                        "speech_summary_th"
+                    ) or ""
                 )[:800],
                 "audio_stats": audio_stats,
+                "scale_review": (
+                    report.get("scale_review")
+                    if isinstance(
+                        report.get("scale_review"),
+                        dict,
+                    )
+                    else {}
+                ),
             }
+
+            return apply_scale_rule(clean)
 
         except (
             KeyError,
@@ -640,10 +1177,9 @@ def gemini_analyze(
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-
             raise AnalysisError(
-                "Gemini ส่งผลลัพธ์ JSON "
-                f"ไม่สมบูรณ์: {exc}"
+                "Gemini ส่ง JSON ไม่ครบตามที่กำหนด: "
+                f"{exc}"
             ) from exc
 
     raise AnalysisError(
@@ -662,11 +1198,10 @@ def inspect(
     start = time.perf_counter()
 
     meta = probe(path)
-
     fps = FPS.get(mode, 2)
 
     with tempfile.TemporaryDirectory(
-        prefix="qc_frames_"
+        prefix="qc_scale_v2_"
     ) as tmp:
 
         folder = Path(tmp)
@@ -686,7 +1221,6 @@ def inspect(
             with Image.open(
                 frames[0]
             ) as im:
-
                 im.thumbnail(
                     (300, 300)
                 )
@@ -703,34 +1237,33 @@ def inspect(
             folder,
         )
 
-        extras = []
+        details = inspect_frames(
+            frames,
+            fps,
+        )
 
         if mode != "Fast":
-            for n, t in enumerate(
-                motion_peaks(
-                    frames,
-                    fps,
-                    meta["duration"],
-                )
-            ):
-                out = (
-                    folder
-                    / f"detail_{n}.jpg"
+            peaks = motion_peaks(
+                frames,
+                fps,
+                meta["duration"],
+            )
+
+            for i, t in enumerate(peaks):
+                out = folder / (
+                    f"motion_{i}.jpg"
                 )
 
                 if extra_frame(
                     path,
-                    max(
-                        0.0,
-                        t - 0.18,
-                    ),
+                    max(0, t - 0.15),
                     out,
                 ):
-                    extras.append(
+                    details.append(
                         (t, out)
                     )
 
-        wav, audio_stats = extract_audio(
+        wav, stats = extract_audio(
             path,
             folder,
             meta["has_audio"],
@@ -740,14 +1273,15 @@ def inspect(
             key,
             model,
             sheets,
-            extras,
+            details,
             wav,
             meta["duration"],
-            audio_stats,
+            stats,
         )
 
     result["duration"] = round(
-        meta["duration"], 2
+        meta["duration"],
+        2,
     )
 
     result["elapsed"] = round(
