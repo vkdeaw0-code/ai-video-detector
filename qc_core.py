@@ -1711,3 +1711,507 @@ def apply_scale_rule(report):
 
     result["issues"] = issues[:25]
     return result
+
+
+
+# ================================================================
+# V3 QUALITY GUARD v3
+# วางต่อท้าย qc_core.py หลัง Scale Deception Guard V2
+# คงระบบตรวจเสียงภาษาไทยเดิม
+# เพิ่มการตรวจสเกลซ้ำเฉพาะคลิป PASS ที่เสี่ยง
+# ================================================================
+
+ENGINE_VERSION = "v3-speech-scale-independent-audit-v3-20261011"
+
+# balanced = ตรวจซ้ำ PASS ประเภท HANDS/MIXED
+#            และคลิป PASS ที่มีข้อสงสัยเรื่องสเกล
+# all_pass = ตรวจซ้ำทุกคลิป PASS
+#            ละเอียดขึ้นแต่ใช้เวลาและโควตามากขึ้น
+SCALE_AUDIT_MODE = "balanced"
+
+
+SCALE_AUDIT_PROMPT = """
+คุณเป็นผู้ตรวจสเกลสินค้าอิสระสำหรับคลิปโฆษณา AI
+
+คุณจะไม่เห็นคำตัดสินของผู้ตรวจคนแรก
+จงประเมินจากภาพที่ได้รับอย่างเป็นอิสระ
+
+เป้าหมาย:
+ตรวจพบความผิดสเกลรุนแรงที่ผู้ตรวจทั่วไปอาจมองข้าม
+แต่ห้ามตัดตกสินค้าที่เป็น MINI ของเล่น ของตั้งโต๊ะ
+หรือสินค้าเล็กที่ใช้งานได้จริงตามวัตถุประสงค์
+
+ต้องแยกการตรวจออกเป็น 3 หลักฐาน:
+
+1. HAND:
+เปรียบเทียบขนาดสินค้ากับมือหรือนิ้ว
+โดยคำนึงถึงระยะใกล้ไกลจากกล้อง
+
+2. ENVIRONMENT:
+เปรียบเทียบกับสิ่งของในสภาพแวดล้อม
+โดยเฉพาะวัตถุที่อยู่ในระนาบใกล้เคียงกัน
+
+3. FUNCTION:
+ขนาดของสินค้าเหมาะสมกับหน้าที่
+และลักษณะการใช้งานที่นำเสนอจริงหรือไม่
+
+ตรวจความต่อเนื่องจากหลายช่วงเวลา:
+- สินค้าขยายหรือหดผิดธรรมชาติหรือไม่
+- โครงสร้างสินค้าเปลี่ยนอย่างเป็นไปไม่ได้หรือไม่
+- มือสัมผัสสินค้าสอดคล้องกับขนาดที่เห็นหรือไม่
+
+ข้อยกเว้น:
+- แป้นบาสตั้งโต๊ะไม่ผิด หากเป็นสินค้าแบบตั้งโต๊ะจริง
+- เครื่องครัวขนาดจิ๋วไม่ผิด หากขายเป็นของเล่นหรือโมเดล
+- ชั้นวางขนาดเล็กไม่ผิด หากใช้วางของเล็กตามที่นำเสนอ
+- ชั้นพับที่กางด้วยกลไกปกติไม่ใช่การขยายตัวผิดธรรมชาติ
+- ถังขยะขนาดเล็กไม่ผิด เพียงเพราะไม่ใช่ถังขยะขนาดใหญ่
+
+ห้ามตัดสิน FAIL เพียงเพราะ:
+- สินค้าอยู่บนโต๊ะ
+- คนถือสินค้าด้วยมือเดียว
+- ภาพมีการซูมหรือเปลี่ยนมุมกล้อง
+- ดูเหมือนของเล่นโดยไม่มีหลักฐานด้านหน้าที่ใช้งาน
+- ภาพไม่คมชัดบางช่วง
+
+FAIL:
+มีหลักฐานชัดอย่างน้อย 2 ด้าน
+ว่าสเกลสินค้าผิดจากการใช้งานที่นำเสนออย่างรุนแรง
+หรือสินค้าชิ้นเดียวกันเปลี่ยนขนาดผิดธรรมชาติจริง
+
+PASS:
+ขนาดและการใช้งานดูสมเหตุสมผล
+รวมถึงรุ่น MINI ที่เป็นสินค้าจริง
+
+UNCERTAIN:
+มีข้อสงสัย แต่หลักฐานยังไม่พอยืนยันว่า FAIL
+
+ตอบ JSON object เท่านั้น ไม่มี Markdown
+
+{
+  "decision": "PASS",
+  "confidence": 0.0,
+  "intentional_mini": false,
+  "mini_reason_th": "",
+  "hand_evidence_th": "",
+  "environment_evidence_th": "",
+  "function_evidence_th": "",
+  "impossible_size_change": false,
+  "temporal_evidence_th": "",
+  "reason_th": ""
+}
+
+confidence คือความมั่นใจว่ามีปัญหารุนแรงจริง
+ถ้าไม่ได้ตัดสิน FAIL ให้ใช้ 0
+
+หากไม่พบหลักฐานจริง
+ต้องปล่อยช่องหลักฐานนั้นเป็นสตริงว่าง
+ห้ามสร้างหลักฐานเพื่อให้ครบเงื่อนไข
+
+งานนี้ตรวจเฉพาะสเกลจากภาพ
+ห้ามเดาว่าคำพูดในคลิปผิดหรือถูก
+"""
+
+
+# เก็บตัวตรวจเดิมไว้
+# เพื่อคง Thai Speech Guard และ Scale Guard V2
+_v3_gemini_analyze_original = gemini_analyze
+
+
+def _v3_scale_needs_audit(report):
+    if report.get("decision") != "PASS":
+        return False
+
+    if SCALE_AUDIT_MODE == "all_pass":
+        return True
+
+    review = report.get("scale_review") or {}
+
+    if not isinstance(review, dict):
+        review = {}
+
+    kind = str(
+        report.get("video_type") or ""
+    ).upper()
+
+    grade = str(
+        review.get("size_grade") or ""
+    ).lower()
+
+    return (
+        kind in ("HANDS", "MIXED")
+        or grade in (
+            "wrong_scale",
+            "suspicious",
+            "unknown",
+        )
+        or _as_bool(
+            review.get("category_scale_mismatch")
+        )
+        or _as_bool(
+            review.get("spoken_claim_conflict")
+        )
+        or _as_bool(
+            review.get("temporal_scale_change")
+        )
+    )
+
+
+def _v3_scale_independent_audit(
+    key,
+    model,
+    sheets,
+    details,
+):
+    parts = [{
+        "text": SCALE_AUDIT_PROMPT,
+    }]
+
+    for path in sheets[:2]:
+        parts.append({
+            "text": "ภาพรวมคลิปหลายช่วงเวลาต่อเนื่อง",
+        })
+
+        parts.append(
+            inline_part(
+                path,
+                "image/jpeg",
+            )
+        )
+
+    for seconds, path in details[:7]:
+        parts.append({
+            "text": (
+                "ภาพเดี่ยวใกล้เวลา "
+                f"{seconds:.1f} วินาที"
+            ),
+        })
+
+        parts.append(
+            inline_part(
+                path,
+                "image/jpeg",
+            )
+        )
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": parts,
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 1600,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    url = (
+        "https://generativelanguage.googleapis.com"
+        f"/v1beta/models/{model}:generateContent"
+    )
+
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    "x-goog-api-key": key,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=(15, 85),
+            )
+
+        except requests.RequestException as exc:
+            if attempt == 0:
+                time.sleep(2)
+                continue
+
+            raise AnalysisError(
+                "ตรวจสเกลซ้ำเชื่อมต่อไม่สำเร็จ: "
+                f"{exc}"
+            ) from exc
+
+        if response.status_code == 429:
+            raise QuotaError(
+                "Gemini ถึงโควตาระหว่างตรวจสเกลซ้ำ"
+            )
+
+        if (
+            response.status_code
+            in (500, 502, 503, 504)
+            and attempt == 0
+        ):
+            time.sleep(2)
+            continue
+
+        if response.status_code >= 400:
+            raise AnalysisError(
+                "ตรวจสเกลซ้ำ HTTP "
+                f"{response.status_code}: "
+                f"{response.text[:230]}"
+            )
+
+        try:
+            obj = response.json()
+
+            raw = "".join(
+                x.get("text", "")
+                for x in (
+                    obj["candidates"][0]
+                    ["content"]["parts"]
+                )
+            ).strip()
+
+            raw = re.sub(
+                r"^```(?:json)?\s*|\s*```$",
+                "",
+                raw,
+            )
+
+            result = json.loads(raw)
+
+            if not isinstance(result, dict):
+                raise ValueError(
+                    "JSON ไม่ใช่ object"
+                )
+
+            if result.get("decision") not in (
+                "PASS",
+                "FAIL",
+                "UNCERTAIN",
+            ):
+                raise ValueError(
+                    "decision ไม่ถูกต้อง"
+                )
+
+            return result
+
+        except (
+            KeyError,
+            IndexError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise AnalysisError(
+                "ผลตรวจสเกลซ้ำอ่านไม่ได้: "
+                f"{exc}"
+            ) from exc
+
+    raise AnalysisError(
+        "Gemini ตรวจสเกลซ้ำไม่สำเร็จ"
+    )
+
+
+def _v3_apply_scale_audit(
+    report,
+    audit,
+):
+    result = dict(report)
+
+    result["scale_audit"] = audit
+    result["scale_audit_override"] = False
+
+    if audit.get("decision") != "FAIL":
+        return result
+
+    try:
+        conf = float(
+            audit.get("confidence") or 0
+        )
+    except (TypeError, ValueError):
+        conf = 0
+
+    if not math.isfinite(conf):
+        conf = 0
+
+    def evidence(field):
+        val = audit.get(field)
+
+        if not isinstance(val, str):
+            return ""
+
+        val = val.strip()
+
+        if len(val) < 15:
+            return ""
+
+        if val.startswith((
+            "ไม่พบ",
+            "ไม่มี",
+            "ไม่แน่",
+            "ไม่ชัด",
+            "ปกติ",
+            "ยืนยันไม่ได้",
+        )):
+            return ""
+
+        return val
+
+    hand = evidence(
+        "hand_evidence_th"
+    )
+
+    env = evidence(
+        "environment_evidence_th"
+    )
+
+    function = evidence(
+        "function_evidence_th"
+    )
+
+    temporal = evidence(
+        "temporal_evidence_th"
+    )
+
+    anchors = sum(
+        bool(s)
+        for s in (
+            hand,
+            env,
+            function,
+        )
+    )
+
+    review = report.get(
+        "scale_review"
+    ) or {}
+
+    if not isinstance(review, dict):
+        review = {}
+
+    originally_mini = (
+        _as_bool(
+            review.get("miniature_disclosed")
+        )
+        and bool(
+            str(
+                review.get(
+                    "explicit_mini_evidence_th"
+                ) or ""
+            ).strip()
+        )
+    )
+
+    intended_mini = _as_bool(
+        audit.get("intentional_mini")
+    )
+
+    confirmed_scale = (
+        conf >= 0.82
+        and anchors >= 2
+        and not intended_mini
+        and not originally_mini
+    )
+
+    confirmed_morph = (
+        conf >= 0.88
+        and _as_bool(
+            audit.get(
+                "impossible_size_change"
+            )
+        )
+        and bool(temporal)
+    )
+
+    if not (
+        confirmed_scale
+        or confirmed_morph
+    ):
+        return result
+
+    reason = str(
+        audit.get("reason_th") or ""
+    ).strip()
+
+    if not reason:
+        reason = "; ".join(
+            x for x in (
+                hand,
+                env,
+                function,
+                temporal,
+            )
+            if x
+        )
+
+    explanation = (
+        "ตรวจสเกลซ้ำพบปัญหารุนแรง: "
+        + reason[:350]
+    )
+
+    result["scale_audit_override"] = True
+    result["decision"] = "FAIL"
+
+    original_reason = str(
+        result.get("reason_th") or ""
+    ).strip()
+
+    result["reason_th"] = (
+        explanation
+        + (
+            " | " + original_reason
+            if original_reason
+            else ""
+        )
+    )[:850]
+
+    issues = result.get("issues")
+
+    issues = (
+        list(issues)
+        if isinstance(issues, list)
+        else []
+    )
+
+    issues.append({
+        "time_sec": 0.0,
+        "category": "product_scale",
+        "severity": "critical",
+        "detail_th": explanation,
+    })
+
+    result["issues"] = issues[:25]
+
+    return result
+
+
+def gemini_analyze(
+    key,
+    model,
+    sheets,
+    details,
+    wav,
+    duration,
+    audio_stats,
+):
+    # รอบแรก:
+    # V3 เดิมตรวจภาพ + เสียง + สเกล
+    report = _v3_gemini_analyze_original(
+        key,
+        model,
+        sheets,
+        details,
+        wav,
+        duration,
+        audio_stats,
+    )
+
+    if not _v3_scale_needs_audit(report):
+        return report
+
+    # รอบสอง:
+    # ตรวจสเกลภาพอีกครั้งเฉพาะ PASS ที่เสี่ยง
+    # ไม่เปลี่ยนกฎเสียงพูดเดิม
+    audit = _v3_scale_independent_audit(
+        key,
+        model,
+        sheets,
+        details,
+    )
+
+    return _v3_apply_scale_audit(
+        report,
+        audit,
+    )
