@@ -1,6 +1,6 @@
 
-"""Streamlit UI for AI Video QC.
-Deploy app.py on Streamlit Community Cloud.
+"""AI Video QC — Batch Manager V3.
+Compatible with qc_core.py Scale Guard V2.
 """
 from __future__ import annotations
 
@@ -15,144 +15,128 @@ import zipfile
 import streamlit as st
 
 from qc_core import ALLOWED_MODELS
-from qc_store import (
-    MAX_BATCH_BYTES,
-    THUMBS,
-    JobManager,
-)
+from qc_store import MAX_BATCH_BYTES, THUMBS, JobManager
 
 st.set_page_config(
-    page_title="AI Clip QC",
+    page_title="AI Video QC | รอบงาน",
     page_icon="🎬",
     layout="wide",
 )
 
 
-def secret(name: str) -> str:
+def get_secret(name):
     try:
         return str(
-            st.secrets.get(
-                name, ""
-            ) or os.getenv(name, "")
+            st.secrets.get(name, "")
+            or os.getenv(name, "")
         )
-    except (
-        FileNotFoundError,
-        KeyError,
-    ):
-        return str(
-            os.getenv(name, "")
-        )
+    except (FileNotFoundError, KeyError):
+        return str(os.getenv(name, ""))
 
 
-PASSWORD = secret("APP_PASSWORD")
-API_KEY = secret("GEMINI_API_KEY")
-
+PASSWORD = get_secret("APP_PASSWORD")
+API_KEY = get_secret("GEMINI_API_KEY")
 
 if not PASSWORD:
     st.error(
-        "🔐 ต้องตั้ง APP_PASSWORD ใน "
-        "Streamlit App Settings → Secrets "
-        "ก่อนเปิดใช้งาน"
+        "ตั้ง APP_PASSWORD ใน Streamlit Cloud "
+        "→ App settings → Secrets ก่อน"
     )
     st.stop()
 
-
-if not st.session_state.get(
-    "authorized"
-):
-    st.title(
-        "🔐 AI Clip QC — เข้าสู่ระบบ"
-    )
-
+if not st.session_state.get("authorized"):
+    st.title("🔐 AI Video QC")
     password = st.text_input(
-        "รหัสผ่านของแอป",
+        "รหัสผ่านเข้าแอป",
         type="password",
     )
-
-    if st.button(
-        "เข้าสู่ระบบ",
-        type="primary",
-    ):
-        if hmac.compare_digest(
-            password,
-            PASSWORD,
-        ):
+    if st.button("เข้าสู่ระบบ", type="primary"):
+        if hmac.compare_digest(password, PASSWORD):
             st.session_state.authorized = True
             st.rerun()
         else:
-            st.error(
-                "รหัสผ่านไม่ถูกต้อง"
-            )
-
+            st.error("รหัสผ่านไม่ถูกต้อง")
     st.stop()
 
 
 @st.cache_resource
-def manager():
+def get_manager():
     return JobManager(API_KEY)
 
 
-svc = manager()
+svc = get_manager()
 svc.update_key(API_KEY)
 
 
-st.title(
-    "🎬 คัดคลิป AI ตามประเภทสินค้า"
-)
+def report_csv(rows):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "filename",
+        "status",
+        "decision",
+        "type",
+        "reason",
+        "duration",
+        "seconds",
+        "error",
+    ])
+    for j in rows:
+        writer.writerow([
+            j["filename"],
+            j["status"],
+            j["verdict"],
+            j["category"],
+            j["reason"],
+            j["duration"],
+            j["elapsed"],
+            j["error"],
+        ])
+    return output.getvalue().encode("utf-8-sig")
 
-st.caption(
-    "ตรวจภาพ/สินค้า/มือ/คน/เสียงภาษาไทย "
-    "• PASS / FAIL "
-    "• คิวตรวจอัตโนมัติ "
-    "• Cache"
-)
 
-
-if not API_KEY:
-    st.error(
-        "กรุณาเพิ่ม GEMINI_API_KEY "
-        "ใน Secrets เพื่อเปิดระบบตรวจ"
-        "ภาพและเสียงด้วย AI"
+def change_to_batch(batch_id):
+    st.session_state.batch_navigation_target = batch_id
+    st.session_state.upload_version = (
+        st.session_state.get("upload_version", 0) + 1
     )
+    st.session_state.pop("last_upload_attempt", None)
+    st.session_state.pop("upload_errors", None)
+    st.session_state.pop("zip_ready", None)
+    st.session_state.pop("upload_summary", None)
+    st.session_state.pop("upload_summary_batch", None)
 
 
 with st.sidebar:
-    st.subheader(
-        "⚙️ ตั้งค่าการตรวจ"
-    )
+    st.subheader("⚙️ ตัวเลือกการตรวจ")
 
     mode = st.selectbox(
         "ความละเอียด",
-        [
-            "Balanced",
-            "Fast",
-            "Deep",
-        ],
+        ["Balanced", "Fast", "Deep"],
         index=0,
-        help=(
-            "Balanced: 2fps, "
-            "Fast: 1fps, "
-            "Deep: 3fps; "
-            "เพิ่มภาพเฉพาะช่วงที่เคลื่อนไหวมาก"
-        ),
+    )
+
+    models = sorted(ALLOWED_MODELS)
+    default_model = (
+        models.index("gemini-3.5-flash-lite")
+        if "gemini-3.5-flash-lite" in models
+        else 0
     )
 
     model = st.selectbox(
         "โมเดล Gemini",
-        sorted(
-            ALLOWED_MODELS
-        ),
-        index=sorted(
-            ALLOWED_MODELS
-        ).index(
-            "gemini-3.5-flash-lite"
-        ),
+        models,
+        index=default_model,
     )
 
     st.caption(
-        "ใช้ Free Tier เฉพาะเมื่อ "
-        "API Key/โปรเจกต์มีสิทธิ์"
-        "และโควตาคงเหลือ"
+        "ใช้ตามสิทธิ์และโควตา Free Tier "
+        "จริงของบัญชี"
+    )
+
+    auto_start = st.checkbox(
+        "เริ่มตรวจอัตโนมัติเมื่อบันทึกคลิป",
+        value=False,
     )
 
     if st.button(
@@ -164,220 +148,355 @@ with st.sidebar:
     if st.button(
         "▶️ ทำงานต่อ",
         use_container_width=True,
-        type="primary",
         disabled=not bool(API_KEY),
     ):
         svc.start()
 
-    disk = svc.disk_usage()
-
     st.caption(
-        "พื้นที่ว่างบนเซิร์ฟเวอร์: "
-        f"{disk.free / 1024**3:.2f} GB"
-    )
-
-    st.info(
-        "Community Cloud อาจพัก/"
-        "รีสตาร์ตแอปได้ "
-        "ข้อมูลบนดิสก์ไม่ใช่ที่เก็บถาวร"
+        "พื้นที่ว่างเซิร์ฟเวอร์: "
+        f"{svc.disk_usage().free / 1024**3:.1f} GB"
     )
 
     if st.button(
-        "🧹 ลบไฟล์คลิปเก่าที่จบงานแล้ว (>7 วัน)"
+        "🧹 ลบไฟล์ต้นฉบับเก่าที่ตรวจจบแล้ว (>7 วัน)",
+        use_container_width=True,
     ):
         st.success(
-            "ลบไฟล์ต้นฉบับ "
-            f"{svc.cleanup(7)} ไฟล์"
+            "ลบไฟล์ต้นฉบับเก่าแล้ว "
+            f"{svc.cleanup(7)} ไฟล์ "
+            "(ประวัติผลตรวจยังอยู่)"
         )
 
-
-if "batch" not in st.session_state:
-    old_batches = svc.batches()
-
-    st.session_state.batch = (
-        old_batches[0]["batch"]
-        if old_batches
-        else svc.new_batch()
+    st.info(
+        "Streamlit Community Cloud ไม่รับประกัน"
+        "การเก็บไฟล์/SQLite ถาวรเมื่อเซิร์ฟเวอร์"
+        "ถูกเปลี่ยนหรือรีสตาร์ต"
     )
 
+
+st.title("🎬 AI Video QC — จัดการรอบตรวจคลิป")
+
+st.caption(
+    "อัปโหลดอัตโนมัติ → เห็นไฟล์ที่บันทึกแล้ว "
+    "→ ตรวจ PASS/FAIL → ปิดรอบ → เริ่มรอบใหม่"
+)
+
+if not API_KEY:
+    st.warning(
+        "ยังไม่พบ GEMINI_API_KEY ใน Secrets "
+        "— บันทึกคลิปได้แต่เริ่มตรวจ AI ไม่ได้"
+    )
+
+
+all_batches = svc.batches()
+
+if not all_batches:
+    svc.create_batch()
+    all_batches = svc.batches()
+
+ids = [b["batch"] for b in all_batches]
+
+pending_navigation = st.session_state.pop(
+    "batch_navigation_target",
+    None,
+)
+
+if pending_navigation in ids:
+    st.session_state.batch_selector = pending_navigation
+
+if st.session_state.get("batch_selector") not in ids:
+    open_batches = [
+        b for b in all_batches
+        if b["state"] == "OPEN"
+    ]
+    st.session_state.batch_selector = (
+        open_batches or all_batches
+    )[0]["batch"]
 
 if "upload_version" not in st.session_state:
     st.session_state.upload_version = 0
 
+map_batches = {
+    b["batch"]: b for b in all_batches
+}
 
-existing = svc.batches()
 
-batch_options = [
-    x["batch"] for x in existing
-]
+def describe_batch(batch_id):
+    b = map_batches[batch_id]
 
-left, right = st.columns(
-    [3, 1]
+    flag = (
+        "🔒 ปิดแล้ว"
+        if b["state"] == "CLOSED"
+        else "📂 เปิดอยู่"
+    )
+
+    return (
+        f"{b['label']} • "
+        f"{b['done']}/{b['n']} คลิป • {flag}"
+    )
+
+
+st.subheader("① เลือกรอบงาน")
+
+if st.session_state.get("upload_errors"):
+    st.error(
+        "ไฟล์บางส่วนยังบันทึกไม่สำเร็จ: "
+        "แก้ไขหรือล้างรายการที่เลือกก่อนเปลี่ยนรอบ"
+    )
+
+selector_disabled = bool(
+    st.session_state.get("upload_errors")
 )
 
+selected = st.selectbox(
+    "ประวัติรอบทั้งหมด (เลือกกลับไปดูย้อนหลังได้)",
+    options=ids,
+    key="batch_selector",
+    format_func=describe_batch,
+    disabled=selector_disabled,
+)
+
+current = map_batches[selected]
+
+left, center, right = st.columns([2, 2, 2])
 
 with left:
-    if batch_options:
-        chosen = st.selectbox(
-            "เลือกรอบการตรวจเดิม",
-            [
-                st.session_state.batch
-            ] + [
-                x
-                for x in batch_options
-                if x != st.session_state.batch
-            ],
-            key="batch_choice",
-        )
-
-        st.session_state.batch = chosen
-
-    st.caption(
-        f"Batch ID: {st.session_state.batch}"
+    st.metric(
+        "ไฟล์ในรอบนี้",
+        f"{current['n']} คลิป",
     )
 
+with center:
+    st.metric(
+        "ตรวจเสร็จ",
+        f"{current['done']}/{current['n']}",
+    )
 
 with right:
-    st.write("")
+    st.metric(
+        "ใช้พื้นที่รอบนี้",
+        f"{current['bytes'] / 1024**2:.1f} MB / 1024 MB",
+    )
 
-    if st.button(
-        "➕ สร้างรอบใหม่",
-        use_container_width=True,
-    ):
-        st.session_state.batch = (
-            svc.new_batch()
+
+with st.expander(
+    "✏️ ตั้งชื่อรอบ เพื่อไม่ให้สับสน "
+    "(เช่น สินค้าครัว รอบเช้า)"
+):
+    with st.form("rename_batch_form"):
+        new_name = st.text_input(
+            "ชื่อรอบ",
+            value=current["label"],
+            max_chars=70,
         )
 
-        st.session_state.pop(
-            "batch_choice",
-            None,
-        )
+        if st.form_submit_button("บันทึกชื่อรอบ"):
+            try:
+                svc.rename_batch(selected, new_name)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
-        st.session_state.upload_version += 1
-        st.rerun()
 
-
-st.subheader(
-    "1. เลือกคลิป (รวมไม่เกิน 1GB ต่อรอบ)"
-)
-
-files = st.file_uploader(
-    "เลือกไฟล์หลายคลิป",
-    type=[
-        "mp4",
-        "mov",
-        "webm",
-        "avi",
-        "mkv",
-    ],
-    accept_multiple_files=True,
-    key=(
-        f"upload_"
-        f"{st.session_state.upload_version}"
+if st.button(
+    "➕ สร้างรอบใหม่ โดยเก็บรอบนี้ไว้",
+    disabled=selector_disabled,
+    help=(
+        "งานที่ยังไม่เสร็จในรอบเดิมยังอยู่ในคิว "
+        "ระบบไม่ได้ลบหรือย้ายคลิป"
     ),
+):
+    new_id = svc.create_batch()
+    change_to_batch(new_id)
+    st.rerun()
+
+
+st.divider()
+
+st.subheader("② เพิ่มคลิปเข้ารอบ")
+
+st.caption(
+    "เมื่อเลือกไฟล์ ระบบจะบันทึกเข้ารอบให้อัตโนมัติ "
+    "แล้วแสดงรายชื่อในตารางด้านล่าง"
 )
 
-
-if files:
-    total = sum(
-        f.size for f in files
+if current["state"] == "CLOSED":
+    st.info(
+        "รอบนี้ปิดแล้ว เปิดดูผลย้อนหลังหรือสร้างรอบใหม่ได้ "
+        "แต่เพิ่มคลิปเข้ารอบเดิมไม่ได้"
     )
 
-    st.write(
-        f"เลือก {len(files)} คลิป "
-        f"• {total / 1024**2:.1f} MB "
-        "/ 1024 MB"
+else:
+    uploaded = st.file_uploader(
+        "เลือกหลายคลิปพร้อมกัน • สูงสุดรวม 1 GB ต่อรอบ",
+        type=[
+            "mp4",
+            "mov",
+            "webm",
+            "avi",
+            "mkv",
+        ],
+        accept_multiple_files=True,
+        key=(
+            f"upload_{selected}_"
+            f"{st.session_state.upload_version}"
+        ),
     )
 
-    if total > MAX_BATCH_BYTES:
-        st.error(
-            "ขนาดไฟล์รวมที่เลือกเกิน 1GB "
-            "กรุณาแบ่งเป็นหลายรอบ"
+    if uploaded:
+        total = sum(f.size for f in uploaded)
+
+        st.caption(
+            f"เลือกมา {len(uploaded)} ไฟล์ "
+            f"({total / 1024**2:.1f} MB) "
+            "— กำลังตรวจว่าบันทึกเข้ารอบได้ครบหรือไม่"
         )
 
-    if st.button(
-        "📥 บันทึกคลิปลงคิว",
-        type="primary",
-        disabled=total > MAX_BATCH_BYTES,
-    ):
-        current = svc.jobs(
-            st.session_state.batch
+        signature = (
+            selected,
+            st.session_state.upload_version,
+            tuple((f.name, f.size) for f in uploaded),
         )
 
-        used = sum(
-            j["size"] for j in current
-        )
-
-        if used + total > MAX_BATCH_BYTES:
+        if total > MAX_BATCH_BYTES:
             st.error(
-                "จำนวนข้อมูลรวมในรอบนี้เกิน 1GB "
-                "ให้สร้างรอบใหม่"
+                "ไฟล์ที่เลือกครั้งนี้รวมกันเกิน 1 GB "
+                "กรุณาเลือกให้น้อยลง"
             )
 
-        elif (
-            svc.disk_usage().free
-            < total + 200 * 1024 * 1024
+        elif signature != st.session_state.get(
+            "last_upload_attempt"
         ):
-            st.error(
-                "พื้นที่เซิร์ฟเวอร์ไม่เพียงพอ"
-                "สำหรับจัดเก็บคลิปทั้งหมด"
-            )
+            st.session_state.last_upload_attempt = signature
 
-        else:
-            ok = 0
+            inserted = 0
+            duplicate = 0
             errors = []
 
-            for f in files:
+            progress = st.progress(
+                0,
+                text="กำลังบันทึกคลิปลงรอบ...",
+            )
+
+            for index, file in enumerate(uploaded):
                 try:
-                    ok += int(
-                        svc.submit(
-                            f,
-                            st.session_state.batch,
-                            mode,
-                            model,
-                        )
+                    was_added = svc.submit(
+                        file,
+                        selected,
+                        mode,
+                        model,
                     )
+
+                    inserted += int(was_added)
+                    duplicate += int(not was_added)
 
                 except Exception as exc:
                     errors.append(
-                        f"{f.name}: {exc}"
+                        f"{file.name}: {exc}"
                     )
 
-            if errors:
-                st.error(
-                    "; ".join(
-                        errors[:5]
-                    )
+                progress.progress(
+                    (index + 1) / len(uploaded),
+                    text=(
+                        f"บันทึก {index + 1}/"
+                        f"{len(uploaded)}"
+                    ),
                 )
 
-            st.success(
-                f"เพิ่มคิวแล้ว {ok} คลิป"
+            progress.empty()
+
+            if errors:
+                st.session_state.upload_errors = errors
+                st.session_state.upload_summary = (
+                    f"บันทึกได้ {inserted}, "
+                    f"ซ้ำ {duplicate}, "
+                    f"ยังไม่สำเร็จ {len(errors)}"
+                )
+                st.session_state.upload_summary_batch = selected
+
+            else:
+                st.session_state.pop(
+                    "upload_errors",
+                    None,
+                )
+
+                st.session_state.upload_summary = (
+                    f"✅ บันทึกเข้ารอบแล้ว {inserted} คลิป "
+                    f"• ข้ามไฟล์ซ้ำ {duplicate} คลิป"
+                )
+
+                st.session_state.upload_summary_batch = selected
+
+                # ล้างช่อง Upload หลังบันทึกสำเร็จเท่านั้น
+                st.session_state.upload_version += 1
+
+                if auto_start and API_KEY and inserted:
+                    svc.start()
+
+                st.rerun()
+
+        if st.session_state.get("upload_errors"):
+            st.warning(
+                st.session_state.get(
+                    "upload_summary",
+                    "บันทึกไม่ครบ",
+                )
             )
 
-            st.session_state.upload_version += 1
-            st.rerun()
+            for error in st.session_state.upload_errors[:10]:
+                st.error(error)
+
+            a, b = st.columns(2)
+
+            with a:
+                if st.button(
+                    "🔄 ลองบันทึกส่วนที่เหลืออีกครั้ง"
+                ):
+                    st.session_state.pop(
+                        "last_upload_attempt",
+                        None,
+                    )
+                    st.rerun()
+
+            with b:
+                if st.button(
+                    "🗑️ ยกเลิกไฟล์ที่ยังไม่บันทึก"
+                ):
+                    st.session_state.pop(
+                        "upload_errors",
+                        None,
+                    )
+                    st.session_state.upload_version += 1
+                    st.rerun()
 
 
-col_start, col_pause = st.columns(
-    [2, 1]
-)
+if (
+    st.session_state.get("upload_summary")
+    and st.session_state.get("upload_summary_batch")
+    == selected
+):
+    st.success(st.session_state.upload_summary)
+
+    st.caption(
+        "ไฟล์ที่เลือกจะถูกล้างจากช่อง Upload "
+        "หลังบันทึกสำเร็จ แต่ไฟล์ยังอยู่ในรอบ "
+        "และแสดงในตารางด้านล่าง"
+    )
 
 
-with col_start:
+col1, col2 = st.columns([2, 1])
+
+with col1:
     if st.button(
-        "▶️ เริ่มตรวจทุกคลิปที่รอคิว",
+        "▶️ เริ่มตรวจคลิปที่รอคิว",
         type="primary",
         use_container_width=True,
         disabled=not bool(API_KEY),
     ):
         svc.start()
+        st.success("เริ่มตรวจคลิปที่รอคิวแล้ว")
 
-        st.success(
-            "เริ่มประมวลผลในคิวแล้ว"
-        )
-
-
-with col_pause:
+with col2:
     if st.button(
         "⏸️ พักหลังจบคลิปนี้",
         use_container_width=True,
@@ -385,17 +504,20 @@ with col_pause:
         svc.stop()
 
 
-st.subheader(
-    "2. ผลการตรวจแบบเรียลไทม์"
-)
+st.divider()
+
+st.subheader("③ รายชื่อไฟล์และผลตรวจในรอบนี้")
 
 
-def display_result():
-    rows = svc.jobs(
-        st.session_state.batch
+@st.fragment(run_every="3s")
+def results_panel(batch_id):
+    rows = svc.jobs(batch_id)
+    batch = svc.batch(batch_id)
+
+    done = sum(
+        j["status"] == "DONE"
+        for j in rows
     )
-
-    n = len(rows)
 
     passed = sum(
         j["verdict"] == "PASS"
@@ -407,236 +529,172 @@ def display_result():
         for j in rows
     )
 
-    finished = sum(
-        j["status"] == "DONE"
+    pending = sum(
+        j["status"] in ("QUEUED", "RUNNING")
         for j in rows
     )
 
-    errors = sum(
-        j["status"] in (
-            "ERROR",
-            "WAITING",
-        )
+    problems = sum(
+        j["status"] in ("ERROR", "WAITING")
         for j in rows
     )
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    cols = st.columns(5)
 
-    for col, label, val in [
-        (c1, "ทั้งหมด", n),
-        (c2, "ตรวจแล้ว", finished),
-        (c3, "✅ ผ่าน", passed),
-        (c4, "❌ ไม่ผ่าน", failed),
-        (c5, "⚠️ ตรวจไม่สำเร็จ", errors),
-    ]:
-        col.metric(
-            label,
-            val,
-        )
+    for col, name, value in zip(
+        cols,
+        [
+            "ทั้งหมด",
+            "เสร็จแล้ว",
+            "✅ PASS",
+            "❌ FAIL",
+            "⚠️ ติดขัด",
+        ],
+        [
+            len(rows),
+            done,
+            passed,
+            failed,
+            problems,
+        ],
+    ):
+        col.metric(name, value)
 
     st.progress(
-        finished / n if n else 0,
-        text=(
-            f"ตรวจแล้ว "
-            f"{finished}/{n} คลิป"
-        ),
+        done / len(rows) if rows else 0,
+        text=f"ตรวจเสร็จ {done}/{len(rows)} คลิป",
     )
 
-    if svc.paused.is_set():
+    if pending and svc.paused.is_set():
         st.warning(
-            "คิวถูกพักไว้: "
-            "อาจเกิดจากกดพักหรือ "
-            "Gemini API ถึงโควตา"
+            "มีคลิปรอคิว แต่คิวกำลังพัก — กดเริ่มตรวจได้"
         )
 
-    if errors:
+    if problems:
+        st.error(
+            f"มี {problems} คลิปที่ตรวจไม่สำเร็จ/"
+            "รอโควตา (ไม่ใช่ FAIL)"
+        )
+
         if st.button(
-            "🔄 ตรวจใหม่เฉพาะคลิป"
-            "ที่ผิดพลาด/รอโควตา",
-            key="retry_failed",
+            "🔄 ลองตรวจเฉพาะคลิปที่ติดขัดอีกครั้ง",
+            key=f"retry_{batch_id}",
             disabled=not bool(API_KEY),
         ):
-            svc.retry(
-                st.session_state.batch
-            )
-
+            svc.retry(batch_id)
             st.rerun()
 
-    st.caption(
-        "สถานะ QUEUED/RUNNING/ERROR/"
-        "WAITING คือสถานะงาน "
-        "ไม่ใช่ผลคุณภาพ FAIL"
+    query = st.text_input(
+        "ค้นหาชื่อคลิป",
+        placeholder="เช่น 001.mp4",
+        key=f"search_{batch_id}",
     )
 
-    status_map = {
-        "QUEUED": "รอคิว",
-        "RUNNING": "กำลังตรวจ",
-        "DONE": "ตรวจแล้ว",
-        "WAITING": "รอโควตา",
-        "ERROR": "ตรวจไม่สำเร็จ",
-    }
-
-    type_map = {
-        "HUMAN": "คนขายสินค้า",
-        "HANDS": "มือโชว์สินค้า",
-        "PRODUCT": "สินค้าอย่างเดียว",
-        "MIXED": "หลายประเภท",
-    }
-
-    choices = st.radio(
-        "กรองผลลัพธ์",
+    choice = st.radio(
+        "แสดงผล",
         [
             "ทั้งหมด",
             "PASS",
             "FAIL",
-            "กำลังตรวจ/ผิดพลาด",
+            "รอ/ผิดพลาด",
         ],
         horizontal=True,
-        key="result_filter",
+        key=f"filter_{batch_id}",
     )
 
     filtered = [
         j for j in rows
-        if (
-            choices == "ทั้งหมด"
-            or j["verdict"] == choices
+        if query.lower() in j["filename"].lower()
+        and (
+            choice == "ทั้งหมด"
+            or j["verdict"] == choice
             or (
-                choices == "กำลังตรวจ/ผิดพลาด"
+                choice == "รอ/ผิดพลาด"
                 and j["status"] != "DONE"
             )
         )
     ]
 
-    page_size = 15
-
-    total_pages = max(
-        1,
-        (
-            len(filtered)
-            + page_size - 1
-        ) // page_size,
-    )
-
-    page = st.number_input(
-        "หน้า",
-        min_value=1,
-        max_value=total_pages,
-        value=1,
-        step=1,
-    )
-
-    subset = filtered[
-        (page - 1) * page_size:
-        page * page_size
-    ]
-
     st.dataframe(
         [
             {
-                "ชื่อคลิป": j["filename"],
-                "สถานะ": (
-                    j["verdict"]
-                    or status_map.get(
-                        j["status"],
-                        j["status"],
-                    )
-                ),
-                "ประเภท": type_map.get(
-                    j["category"],
-                    "—",
-                ),
+                "ไฟล์": f"{i + 1:03d}. {j['filename']}",
+                "ผล": j["verdict"] or j["status"],
+                "ประเภท": {
+                    "HUMAN": "คนขาย",
+                    "HANDS": "มือโชว์",
+                    "PRODUCT": "โชว์สินค้า",
+                    "MIXED": "ผสม",
+                }.get(j["category"], "—"),
                 "เหตุผล": (
                     j["reason"]
                     or j["error"]
                     or "—"
                 ),
-                "เวลา (วินาที)": (
-                    j["elapsed"] or 0
-                ),
-                "ใช้ Cache": (
-                    "ใช่"
-                    if j["cache_hit"]
-                    else ""
-                ),
+                "เวลา(s)": j["elapsed"] or 0,
             }
-            for j in subset
+            for i, j in enumerate(filtered)
         ],
         use_container_width=True,
         hide_index=True,
+        height=360,
     )
 
-    if rows:
+    if filtered:
         options = {
-            f"{j['filename']} ({j['id'][:5]})": j
+            f"{j['filename']} [{j['id'][:7]}]": j
             for j in filtered
         }
 
-        if options:
-            selected = st.selectbox(
-                "▶️ เปิดดูคลิปและเหตุผลละเอียด",
-                list(options),
-                key="video_pick",
-            )
+        picked = st.selectbox(
+            "ดูวิดีโอและสาเหตุแบบละเอียด",
+            list(options),
+            key=f"pick_{batch_id}",
+        )
 
-            j = options[selected]
+        job = options[picked]
 
-            if Path(
-                j["path"]
-            ).exists():
-
-                st.video(
-                    j["path"]
-                )
-
+        with st.expander(
+            "▶️ เปิดคลิป / รายละเอียด",
+            expanded=False,
+        ):
+            if Path(job["path"]).is_file():
+                st.video(job["path"])
             else:
-                st.info(
-                    "ไฟล์ต้นฉบับถูกลบหรือ"
-                    "เซิร์ฟเวอร์รีสตาร์ตแล้ว "
-                    "แต่ผลวิเคราะห์ยังอาจมี"
-                    "ในฐานข้อมูล"
+                st.warning(
+                    "ไม่พบไฟล์ต้นฉบับบนเซิร์ฟเวอร์"
                 )
 
-            thumb = (
-                THUMBS
-                / f"{j['sha256']}.jpg"
+            thumbnail = (
+                THUMBS / f"{job['sha256']}.jpg"
             )
 
-            if thumb.exists():
+            if thumbnail.exists():
                 st.image(
-                    str(thumb),
-                    width=230,
+                    str(thumbnail),
+                    width=240,
                 )
 
             st.write(
-                "**ผล:**",
-                (
-                    j["verdict"]
-                    or status_map.get(
-                        j["status"],
-                        j["status"],
-                    )
-                ),
+                "**ผลตรวจ:**",
+                job["verdict"] or job["status"],
             )
 
             st.write(
-                "**เหตุผล:**",
-                (
-                    j["reason"]
-                    or j["error"]
-                    or "รอการตรวจ"
-                ),
+                "**สาเหตุ:**",
+                job["reason"]
+                or job["error"]
+                or "รอการตรวจ",
             )
 
-            if j["details"]:
-                with st.expander(
-                    "รายการตรวจพบและสรุปเสียง"
-                ):
+            if job["details"]:
+                try:
                     details = json.loads(
-                        j["details"]
+                        job["details"]
                     )
 
                     st.write(
-                        "สรุปเสียง/คำพูด:",
+                        "**คำพูด:**",
                         details.get(
                             "speech_summary_th",
                             "",
@@ -647,189 +705,159 @@ def display_result():
                         "issues", []
                     ):
                         st.write(
-                            f"- เวลา "
-                            f"~{issue.get('time_sec', '?')}s "
-                            f"| {issue.get('category', '')} "
-                            f"| {issue.get('severity', '')}: "
+                            f"~{issue.get('time_sec', '?')}s: "
                             f"{issue.get('detail_th', '')}"
                         )
 
+                except (ValueError, TypeError):
+                    st.warning(
+                        "ข้อมูลรายละเอียดไม่สมบูรณ์"
+                    )
+
     if rows:
-        output = io.StringIO()
-
-        writer = csv.writer(
-            output
-        )
-
-        writer.writerow([
-            "filename",
-            "status",
-            "decision",
-            "video_type",
-            "reason",
-            "duration",
-            "elapsed",
-            "error",
-        ])
-
-        for j in rows:
-            writer.writerow([
-                j["filename"],
-                j["status"],
-                j["verdict"],
-                j["category"],
-                j["reason"],
-                j["duration"],
-                j["elapsed"],
-                j["error"],
-            ])
-
         st.download_button(
-            "📄 ดาวน์โหลดรายงาน CSV",
-            output.getvalue().encode(
-                "utf-8-sig"
-            ),
-            file_name=(
-                f"qc_report_"
-                f"{st.session_state.batch}.csv"
-            ),
+            "📄 ดาวน์โหลดผลรอบนี้ (CSV)",
+            report_csv(rows),
+            file_name=f"video_qc_{batch_id}.csv",
             mime="text/csv",
+            key=f"csv_{batch_id}",
         )
 
-        st.markdown(
-            "**ดาวน์โหลดไฟล์เป็น ZIP "
-            "แยกตามผล "
-            "(แบ่งชุดละไม่เกิน ~100MB "
-            "เพื่อจำกัด RAM)**"
-        )
-
-        for verdict in (
-            "PASS",
-            "FAIL",
-        ):
+        for verdict in ("PASS", "FAIL"):
             eligible = [
                 j for j in rows
                 if (
                     j["verdict"] == verdict
-                    and Path(
-                        j["path"]
-                    ).is_file()
+                    and Path(j["path"]).is_file()
                 )
             ]
 
-            pieces = []
-            current = []
-            current_size = 0
+            chunks = []
+            chunk = []
+            size = 0
 
             for j in eligible:
                 if (
-                    current
-                    and current_size
-                    + j["size"]
-                    > 100 * 1024 * 1024
+                    chunk
+                    and size + j["size"]
+                    > 100 * 1024**2
                 ):
-                    pieces.append(
-                        current
-                    )
+                    chunks.append(chunk)
+                    chunk = []
+                    size = 0
 
-                    current = []
-                    current_size = 0
+                chunk.append(j)
+                size += j["size"]
 
-                current.append(j)
-                current_size += j["size"]
+            if chunk:
+                chunks.append(chunk)
 
-            if current:
-                pieces.append(
-                    current
-                )
-
-            for ix, piece in enumerate(
-                pieces, 1
+            for index, group in enumerate(
+                chunks, 1
             ):
-                size = sum(
-                    j["size"]
-                    for j in piece
-                )
-
-                if size > 150 * 1024 * 1024:
+                if sum(
+                    j["size"] for j in group
+                ) > 150 * 1024**2:
                     st.warning(
-                        f"{piece[0]['filename']} "
-                        "ใหญ่เกินสำหรับ ZIP บนคลาวด์ "
-                        "แนะนำดาวน์โหลดไฟล์ต้นฉบับแยก"
+                        f"ไฟล์ {group[0]['filename']} "
+                        "ใหญ่เกินสำหรับ ZIP ภายในแอป"
                     )
                     continue
 
-                button_key = (
-                    f"zip_{verdict}_{ix}_"
-                    f"{st.session_state.batch}"
-                )
-
                 if st.button(
-                    f"📦 เตรียม ZIP {verdict} "
-                    f"ส่วน {ix}/{len(pieces)} "
-                    f"({size / 1024**2:.0f}MB)",
-                    key=button_key,
+                    f"📦 เตรียม {verdict} ZIP "
+                    f"ส่วน {index}/{len(chunks)}",
+                    key=(
+                        f"make_{batch_id}_"
+                        f"{verdict}_{index}"
+                    ),
                 ):
-                    buffer = io.BytesIO()
+                    buf = io.BytesIO()
 
                     with zipfile.ZipFile(
-                        buffer,
-                        "w",
-                        zipfile.ZIP_STORED,
-                        allowZip64=True,
+                        buf,
+                        mode="w",
+                        compression=zipfile.ZIP_STORED,
                     ) as z:
-                        for item in piece:
+                        for item in group:
                             z.write(
                                 item["path"],
                                 arcname=(
                                     f"{item['id'][:6]}_"
-                                    f"{Path(item['filename']).name}"
+                                    f"{item['filename']}"
                                 ),
                             )
 
-                    st.session_state[
-                        "prepared_zip"
-                    ] = (
+                    st.session_state.zip_ready = (
+                        batch_id,
                         verdict,
-                        ix,
-                        st.session_state.batch,
-                        buffer.getvalue(),
+                        index,
+                        buf.getvalue(),
                     )
 
-        ready = st.session_state.get(
-            "prepared_zip"
-        )
+        ready = st.session_state.get("zip_ready")
 
-        if (
-            ready
-            and ready[2]
-            == st.session_state.batch
-        ):
+        if ready and ready[0] == batch_id:
             st.download_button(
-                f"⬇️ ดาวน์โหลด ZIP "
-                f"{ready[0]} "
-                f"ส่วน {ready[1]}",
+                f"⬇️ ดาวน์โหลด {ready[1]} "
+                f"ส่วน {ready[2]}",
                 ready[3],
                 file_name=(
-                    f"{ready[0]}_"
-                    f"{ready[2]}_"
-                    f"part{ready[1]}.zip"
+                    f"{batch_id}_{ready[1]}_"
+                    f"{ready[2]}.zip"
                 ),
                 mime="application/zip",
+                key=f"download_zip_{batch_id}",
             )
 
+    st.divider()
 
-@st.fragment(
-    run_every="3s"
-)
-def live_results():
-    display_result()
+    if batch and batch["state"] == "CLOSED":
+        st.success(
+            "🔒 รอบนี้ปิดแล้ว — ผลตรวจยังเปิดดูได้"
+            "จากรายการรอบย้อนหลัง"
+        )
+
+    elif rows and done == len(rows):
+        st.success(
+            "🎉 ตรวจครบทุกคลิปในรอบนี้แล้ว"
+        )
+
+        if st.button(
+            "✅ ปิดรอบนี้และเริ่มรอบถัดไป",
+            type="primary",
+            key=f"next_{batch_id}",
+        ):
+            try:
+                svc.close_batch(batch_id)
+                new_id = svc.create_batch()
+
+                change_to_batch(new_id)
+
+                st.session_state.upload_summary = (
+                    "เริ่มรอบใหม่แล้ว รอบเก่า"
+                    "ถูกเก็บในประวัติ ไม่ได้ลบไฟล์"
+                )
+                st.session_state.upload_summary_batch = (
+                    new_id
+                )
+                st.rerun()
+
+            except ValueError as exc:
+                st.error(str(exc))
+
+    else:
+        st.caption(
+            "เมื่อทุกคลิปตรวจสำเร็จ ปุ่ม "
+            "‘ปิดรอบนี้และเริ่มรอบถัดไป’ "
+            "จะปรากฏที่นี่"
+        )
 
 
-live_results()
+results_panel(selected)
 
 st.caption(
-    "ผล AI เป็นการคัดกรองเบื้องต้น "
-    "ควรสุ่มตรวจด้วยมนุษย์"
-    "ก่อนนำไปใช้เชิงพาณิชย์"
+    "ข้อควรระวัง: ไฟล์และประวัติบน "
+    "Community Cloud อาจหายหากเซิร์ฟเวอร์รีเซ็ต "
+    "โปรดดาวน์โหลด CSV/ZIP ทุกครั้งเมื่อจบรอบ"
 )
