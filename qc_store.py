@@ -1,9 +1,15 @@
 
-"""AI Video QC — Persistent Batch Queue V3.
+"""AI Video QC V3.5 — One-Drop JSON + MP4 Queue.
 
-Uses local SQLite for batches, jobs and cached results.
-Streamlit Community Cloud does not guarantee permanent storage.
+- Up to 150 videos per round
+- One JSON per video
+- Max 1200 MB total video storage
+- Streamed file processing
+- JSON matched by video_filename
+- No historical AI result cache
+- Compatible with V3.4 qc_core.py
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -14,328 +20,519 @@ import sqlite3
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
+import zipfile
 
 from contextlib import closing
 from pathlib import Path
 
 from qc_core import (
-    ENGINE_VERSION,
     AnalysisError,
     QuotaError,
     inspect,
 )
 
+
+# ==============================================
+# SETTINGS
+# ==============================================
+
 ROOT = Path(
     os.getenv("QC_DATA_DIR", "runtime_data")
 ).resolve()
 
-UPLOADS = ROOT / "uploads"
-THUMBS = ROOT / "thumbnails"
-DB = ROOT / "queue.sqlite3"
+ACTIVE = ROOT / "json_current_round"
+UPLOADS = ACTIVE / "videos"
+THUMBS = ACTIVE / "thumbnails"
+EXPORTS = ACTIVE / "exports"
+DB = ACTIVE / "work.sqlite3"
 
-ALLOWED_SUFFIXES = {
+VIDEO_EXTS = {
     ".mp4",
     ".mov",
-    ".webm",
-    ".avi",
     ".mkv",
+    ".avi",
+    ".webm",
 }
 
-MAX_BATCH_BYTES = 1024**3
+MAX_VIDEO = 50 * 1024**2
+MAX_ZIP = 100 * 1024**2
+MAX_JSON = 150 * 1024
+
+MAX_ZIP_EXPANDED = 250 * 1024**2
+
+# Maximum number of videos per round
+MAX_VIDEOS = 150
+
+# Maximum total video size: 1200 MB
+MAX_ACTIVE_BYTES = 1200 * 1024**2
+
+# Keep some free disk space
+MIN_DISK_FREE = 260 * 1024**2
 
 
-def connection():
-    con = sqlite3.connect(
+# ==============================================
+# DATABASE HELPERS
+# ==============================================
+
+def _db():
+
+    conn = sqlite3.connect(
         DB,
-        timeout=25,
+        timeout=30,
     )
-    con.row_factory = sqlite3.Row
-    con.execute(
-        "PRAGMA busy_timeout=25000"
+
+    conn.row_factory = sqlite3.Row
+
+    conn.execute(
+        "PRAGMA busy_timeout=30000"
     )
-    return con
+
+    return conn
 
 
-class JobManager:
+def _name(value):
 
-    def __init__(self, api_key: str):
-        for p in (
-            ROOT,
+    raw = unicodedata.normalize(
+        "NFC",
+        str(value or "").replace("\\", "/"),
+    )
+
+    return raw.split("/")[-1].strip()[:190]
+
+
+def _key(value):
+
+    return _name(value).casefold()
+
+
+def _reference_text(data):
+    """
+    Create product reference for Gemini.
+
+    The V3.4 core currently reads
+    the first 900 characters.
+    """
+
+    title = str(
+        data.get("title", "")
+    ).strip()[:370]
+
+    caption = str(
+        data.get("caption", "")
+    ).strip()[:290]
+
+    extras = {}
+
+    for field in (
+        "size",
+        "quantity",
+        "capacity",
+        "category",
+        "specifications",
+    ):
+
+        value = data.get(field)
+
+        if value is not None and value != "":
+            extras[field] = value
+
+    specs = json.dumps(
+        extras,
+        ensure_ascii=False,
+        default=str,
+    )[:260]
+
+    return (
+        f"ชื่อสินค้าที่ขายจริง: {title}\n"
+        f"สเปกที่ร้านระบุ: {specs}\n"
+        f"รายละเอียดโฆษณาที่ให้มา: {caption}"
+    )[:890]
+
+
+# ==============================================
+# ACTIVE QUEUE
+# ==============================================
+
+class ActiveQueue:
+
+    def __init__(self, api_key):
+
+        for folder in (
+            ACTIVE,
             UPLOADS,
             THUMBS,
+            EXPORTS,
         ):
-            p.mkdir(
+
+            folder.mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
         self.api_key = api_key
+
         self.lock = threading.RLock()
+
         self.paused = threading.Event()
         self.paused.set()
 
-        with self.lock, closing(connection()) as con:
-            con.execute(
+        with self.lock, closing(_db()) as conn:
+
+            conn.execute(
                 "PRAGMA journal_mode=WAL"
             )
 
-            con.executescript("""
-            CREATE TABLE IF NOT EXISTS jobs (
-              id TEXT PRIMARY KEY,
-              batch TEXT NOT NULL,
-              filename TEXT NOT NULL,
-              sha256 TEXT NOT NULL,
-              path TEXT NOT NULL,
-              size INTEGER NOT NULL,
-              mode TEXT NOT NULL,
-              model TEXT NOT NULL,
-              status TEXT NOT NULL,
-              verdict TEXT,
-              category TEXT,
-              reason TEXT,
-              details TEXT,
-              duration REAL,
-              elapsed REAL,
-              cache_hit INTEGER DEFAULT 0,
-              error TEXT,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL
-            );
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS product_refs (
+                    name_key TEXT PRIMARY KEY,
+                    video_filename TEXT NOT NULL,
+                    json_filename TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    caption TEXT NOT NULL,
+                    product_link TEXT NOT NULL,
+                    reference_text TEXT NOT NULL,
+                    json_digest TEXT NOT NULL,
+                    added_at REAL NOT NULL
+                );
 
-            CREATE INDEX IF NOT EXISTS jobs_batch_idx
-              ON jobs(batch, created_at);
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    name_key TEXT NOT NULL UNIQUE,
+                    filename TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    verdict TEXT,
+                    category TEXT,
+                    reason TEXT,
+                    details TEXT,
+                    duration REAL,
+                    elapsed REAL,
+                    error TEXT,
+                    added_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
 
-            CREATE INDEX IF NOT EXISTS jobs_status_idx
-              ON jobs(status, created_at);
+                CREATE INDEX IF NOT EXISTS
+                    jobs_status_idx
+                ON jobs(status, added_at);
 
-            CREATE INDEX IF NOT EXISTS jobs_hash_in_batch
-              ON jobs(batch, sha256);
-
-            CREATE TABLE IF NOT EXISTS cache (
-              cache_key TEXT PRIMARY KEY,
-              result_json TEXT NOT NULL,
-              created_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS batches (
-              id TEXT PRIMARY KEY,
-              label TEXT NOT NULL,
-              state TEXT NOT NULL DEFAULT 'OPEN',
-              created_at REAL NOT NULL,
-              closed_at REAL
-            );
+                UPDATE jobs
+                SET status='QUEUED'
+                WHERE status='RUNNING';
             """)
 
-            # ย้ายประวัติจากเวอร์ชันเก่าเข้าระบบรอบใหม่
-            con.execute("""
-              INSERT OR IGNORE INTO batches(
-                id, label, state, created_at
-              )
-              SELECT
-                batch,
-                'รอบเดิม • ' || SUBSTR(batch,1,15),
-                'OPEN',
-                MIN(created_at)
-              FROM jobs
-              GROUP BY batch
-            """)
-
-            # งานที่ถูกขัดจังหวะระหว่างตรวจกลับมารอคิว
-            con.execute("""
-              UPDATE jobs
-              SET status='QUEUED'
-              WHERE status='RUNNING'
-            """)
-
-            con.commit()
+            conn.commit()
 
         self.worker = threading.Thread(
             target=self._work,
             daemon=True,
-            name="qc-worker",
         )
+
         self.worker.start()
 
-    def update_key(self, key: str):
-        if key:
-            self.api_key = key
+    # ==========================================
+    # API KEY
+    # ==========================================
 
-    def create_batch(self, label: str = "") -> str:
-        now = time.time()
+    def update_key(self, api_key):
 
-        with self.lock, closing(connection()) as con, con:
-            count = con.execute(
-                "SELECT COUNT(*) FROM batches"
-            ).fetchone()[0]
+        self.api_key = api_key
 
-            batch_id = (
-                time.strftime("%Y%m%d-%H%M%S")
-                + "-"
-                + uuid.uuid4().hex[:6]
-            )
+    # ==========================================
+    # JOB LIST
+    # ==========================================
 
-            clean = (
-                label.strip()[:70]
-                or f"รอบที่ {count + 1:03d}"
-            )
+    def jobs(self):
 
-            con.execute("""
-              INSERT INTO batches(
-                id, label, state, created_at
-              )
-              VALUES(?,?,?,?)
-            """, (
-                batch_id,
-                clean,
-                "OPEN",
-                now,
-            ))
+        with self.lock, closing(_db()) as conn:
 
-        return batch_id
-
-    def batches(self):
-        with self.lock, closing(connection()) as con:
             return [
-                dict(r)
-                for r in con.execute("""
-                  SELECT
-                    b.id AS batch,
-                    b.label,
-                    b.state,
-                    b.created_at,
-                    b.closed_at,
-                    COUNT(j.id) AS n,
-                    COALESCE(SUM(j.size),0) AS bytes,
-                    COALESCE(SUM(
-                      CASE WHEN j.status='DONE'
-                      THEN 1 ELSE 0 END
-                    ),0) AS done,
-                    COALESCE(SUM(
-                      CASE WHEN j.verdict='PASS'
-                      THEN 1 ELSE 0 END
-                    ),0) AS passed,
-                    COALESCE(SUM(
-                      CASE WHEN j.verdict='FAIL'
-                      THEN 1 ELSE 0 END
-                    ),0) AS failed,
-                    COALESCE(SUM(
-                      CASE WHEN j.status
-                      IN ('ERROR','WAITING')
-                      THEN 1 ELSE 0 END
-                    ),0) AS errors
-                  FROM batches b
-                  LEFT JOIN jobs j ON j.batch=b.id
-                  GROUP BY b.id
-                  ORDER BY b.created_at DESC
+                dict(row)
+                for row in conn.execute("""
+                    SELECT
+                        j.*,
+                        p.title AS product_title,
+                        p.json_filename AS matched_json,
+                        p.reference_text AS product_reference
+                    FROM jobs j
+                    LEFT JOIN product_refs p
+                    ON j.name_key=p.name_key
+                    ORDER BY j.added_at,j.id
                 """)
             ]
 
-    def batch(self, batch_id: str):
-        for b in self.batches():
-            if b["batch"] == batch_id:
-                return b
-        return None
+    # ==========================================
+    # STATISTICS
+    # ==========================================
 
-    def rename_batch(self, batch_id: str, label: str):
-        clean = label.strip()[:70]
+    def stats(self):
 
-        if not clean:
-            raise ValueError("กรุณาตั้งชื่อรอบ")
+        with self.lock, closing(_db()) as conn:
 
-        with self.lock, closing(connection()) as con, con:
-            con.execute(
-                "UPDATE batches SET label=? WHERE id=?",
-                (clean, batch_id),
-            )
+            count, used = conn.execute("""
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(size),0)
+                FROM jobs
+            """).fetchone()
 
-    def close_batch(self, batch_id: str):
-        with self.lock, closing(connection()) as con, con:
-            batch = con.execute(
-                "SELECT state FROM batches WHERE id=?",
-                (batch_id,),
-            ).fetchone()
-
-            if not batch or batch["state"] != "OPEN":
-                raise ValueError(
-                    "รอบนี้ถูกปิดไปแล้ว"
-                )
-
-            total, pending = con.execute("""
-              SELECT
-                COUNT(*),
-                COALESCE(SUM(
-                  CASE WHEN status!='DONE'
-                  THEN 1 ELSE 0 END
-                ),0)
-              FROM jobs
-              WHERE batch=?
-            """, (batch_id,)).fetchone()
-
-            if total == 0 or pending:
-                raise ValueError(
-                    "ปิดรอบได้เมื่อตรวจครบทุกคลิปแล้วเท่านั้น"
-                )
-
-            con.execute("""
-              UPDATE batches
-              SET state='CLOSED', closed_at=?
-              WHERE id=?
-            """, (
-                time.time(),
-                batch_id,
-            ))
-
-    def jobs(self, batch_id: str):
-        with self.lock, closing(connection()) as con:
-            return [
-                dict(r)
-                for r in con.execute("""
-                  SELECT *
-                  FROM jobs
-                  WHERE batch=?
-                  ORDER BY created_at,id
-                """, (batch_id,))
-            ]
-
-    def queue_count(self):
-        with self.lock, closing(connection()) as con:
-            return con.execute("""
-              SELECT COUNT(*)
-              FROM jobs
-              WHERE status='QUEUED'
+            references = conn.execute("""
+                SELECT COUNT(*)
+                FROM product_refs
             """).fetchone()[0]
 
-    def submit(
+            return (
+                int(count),
+                int(used),
+                int(references),
+            )
+
+    def unmatched_references(self):
+
+        with self.lock, closing(_db()) as conn:
+
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT
+                        p.video_filename,
+                        p.title
+                    FROM product_refs p
+                    LEFT JOIN jobs j
+                    ON p.name_key=j.name_key
+                    WHERE j.id IS NULL
+                    ORDER BY p.added_at
+                """)
+            ]
+
+    def free_disk(self):
+
+        return shutil.disk_usage(ROOT).free
+
+    # ==========================================
+    # ADD JSON
+    # ==========================================
+
+    def add_json(
         self,
-        uploaded,
-        batch_id: str,
-        mode: str,
-        model: str,
-    ) -> bool:
-        """Add file to batch. False means duplicate."""
+        raw,
+        filename="product.json",
+    ):
 
-        original = Path(
-            str(uploaded.name).replace("\\", "/")
-        ).name[:180]
+        if not 0 < len(raw) <= MAX_JSON:
 
-        ext = Path(original).suffix.lower()
-        size = int(uploaded.size)
+            raise ValueError(
+                "JSON ต้องมีขนาด 1–150 KB"
+            )
+
+        try:
+
+            data = json.loads(
+                raw.decode("utf-8-sig")
+            )
+
+        except (UnicodeError, ValueError) as exc:
+
+            raise ValueError(
+                f"อ่าน JSON ไม่สำเร็จ: {exc}"
+            ) from exc
+
+        if not isinstance(data, dict):
+
+            raise ValueError(
+                "JSON ต้องเป็น object "
+                "ที่มี title และ video_filename"
+            )
+
+        video_name = _name(
+            data.get("video_filename", "")
+        )
 
         if (
-            ext not in ALLOWED_SUFFIXES
-            or not original
+            not video_name
+            or Path(video_name).suffix.lower()
+            not in VIDEO_EXTS
         ):
+
             raise ValueError(
-                f"ไม่รองรับชนิดไฟล์ {original}"
+                "ต้องมี video_filename "
+                "ลงท้ายด้วยนามสกุลวิดีโอ"
             )
 
-        if not (0 < size <= MAX_BATCH_BYTES):
+        title = data.get("title")
+
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+        ):
+
             raise ValueError(
-                "ไฟล์ว่างหรือใหญ่เกิน 1GB"
+                "JSON ต้องมี title "
+                "เป็นชื่อสินค้าที่ไม่ว่าง"
             )
 
-        fd, temp_name = tempfile.mkstemp(
+        caption = data.get("caption", "")
+        link = data.get("product_link", "")
+
+        if (
+            not isinstance(caption, str)
+            or not isinstance(link, str)
+        ):
+
+            raise ValueError(
+                "caption และ product_link "
+                "ต้องเป็นข้อความ"
+            )
+
+        name_key = _key(video_name)
+
+        reference_text = _reference_text(
+            data
+        )
+
+        digest = hashlib.sha256(
+            reference_text.encode("utf-8")
+        ).hexdigest()
+
+        with self.lock, closing(_db()) as conn, conn:
+
+            conn.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            existing = conn.execute("""
+                SELECT json_digest
+                FROM product_refs
+                WHERE name_key=?
+            """, (
+                name_key,
+            )).fetchone()
+
+            if (
+                existing
+                and existing["json_digest"] == digest
+            ):
+
+                return False
+
+            busy = conn.execute("""
+                SELECT status
+                FROM jobs
+                WHERE name_key=?
+            """, (
+                name_key,
+            )).fetchone()
+
+            if (
+                busy
+                and busy["status"] == "RUNNING"
+            ):
+
+                raise ValueError(
+                    "คลิปนี้กำลังตรวจอยู่ "
+                    "กรุณารอให้จบก่อนเปลี่ยน JSON"
+                )
+
+            conn.execute("""
+                INSERT INTO product_refs (
+                    name_key,
+                    video_filename,
+                    json_filename,
+                    title,
+                    caption,
+                    product_link,
+                    reference_text,
+                    json_digest,
+                    added_at
+                )
+                VALUES (?,?,?,?,?,?,?,?,?)
+
+                ON CONFLICT(name_key)
+                DO UPDATE SET
+                    video_filename=excluded.video_filename,
+                    json_filename=excluded.json_filename,
+                    title=excluded.title,
+                    caption=excluded.caption,
+                    product_link=excluded.product_link,
+                    reference_text=excluded.reference_text,
+                    json_digest=excluded.json_digest,
+                    added_at=excluded.added_at
+            """, (
+                name_key,
+                video_name,
+                _name(filename),
+                title[:500],
+                caption[:1000],
+                link[:500],
+                reference_text,
+                digest,
+                time.time(),
+            ))
+
+            # JSON arrives after video:
+            # release the matching job.
+
+            # If JSON changes after inspection:
+            # invalidate the previous verdict.
+
+            conn.execute("""
+                UPDATE jobs
+                SET
+                    status='QUEUED',
+                    verdict=NULL,
+                    category=NULL,
+                    reason=NULL,
+                    details=NULL,
+                    duration=NULL,
+                    elapsed=NULL,
+                    error=NULL,
+                    updated_at=?
+                WHERE name_key=?
+                AND status!='RUNNING'
+            """, (
+                time.time(),
+                name_key,
+            ))
+
+        return True
+
+    # ==========================================
+    # ADD VIDEO
+    # ==========================================
+
+    def add_video(
+        self,
+        stream,
+        filename,
+        size,
+        mode,
+        model,
+    ):
+
+        filename = _name(filename)
+
+        if (
+            Path(filename).suffix.lower()
+            not in VIDEO_EXTS
+        ):
+
+            raise ValueError(
+                "ไม่รองรับไฟล์วิดีโอนี้"
+            )
+
+        if not 0 < size <= MAX_VIDEO:
+
+            raise ValueError(
+                "วิดีโอแต่ละไฟล์ต้องไม่เกิน 50 MB"
+            )
+
+        fd, temp = tempfile.mkstemp(
             prefix="incoming_",
             dir=UPLOADS,
         )
@@ -344,332 +541,694 @@ class JobManager:
         written = 0
 
         try:
-            with os.fdopen(fd, "wb") as out:
-                uploaded.seek(0)
 
-                while chunk := uploaded.read(1024 * 1024):
+            with os.fdopen(fd, "wb") as output:
+
+                while True:
+
+                    chunk = stream.read(
+                        1024 * 1024
+                    )
+
+                    if not chunk:
+                        break
+
                     written += len(chunk)
-                    out.write(chunk)
+
+                    if written > MAX_VIDEO:
+
+                        raise ValueError(
+                            "วิดีโอเกิน 50 MB"
+                        )
+
+                    output.write(chunk)
                     digest.update(chunk)
 
             if written != size:
+
                 raise ValueError(
-                    "ข้อมูลไฟล์อัปโหลดไม่ครบ กรุณาลองใหม่"
+                    "ไฟล์อัปโหลดไม่ครบ "
+                    "กรุณาลองใหม่"
                 )
 
             sha = digest.hexdigest()
-            saved = UPLOADS / f"{sha}{ext}"
+            name_key = _key(filename)
 
-            with self.lock, closing(connection()) as con, con:
-                con.execute("BEGIN IMMEDIATE")
+            with self.lock, closing(_db()) as conn, conn:
 
-                batch = con.execute(
-                    "SELECT state FROM batches WHERE id=?",
-                    (batch_id,),
-                ).fetchone()
+                conn.execute(
+                    "BEGIN IMMEDIATE"
+                )
 
-                if (
-                    not batch
-                    or batch["state"] != "OPEN"
-                ):
-                    raise ValueError(
-                        "รอบนี้ปิดแล้ว โปรดสร้างรอบใหม่"
-                    )
-
-                existing = con.execute("""
-                  SELECT 1 FROM jobs
-                  WHERE batch=? AND sha256=?
+                old = conn.execute("""
+                    SELECT sha256
+                    FROM jobs
+                    WHERE name_key=?
                 """, (
-                    batch_id,
-                    sha,
+                    name_key,
                 )).fetchone()
 
-                if existing:
-                    return False
+                if old:
 
-                used = con.execute("""
-                  SELECT COALESCE(SUM(size),0)
-                  FROM jobs
-                  WHERE batch=?
-                """, (batch_id,)).fetchone()[0]
+                    if old["sha256"] == sha:
+                        return False
 
-                if used + size > MAX_BATCH_BYTES:
                     raise ValueError(
-                        "ข้อมูลรวมในรอบเกิน 1GB "
-                        "ให้สร้างรอบใหม่"
+                        "ชื่อวิดีโอซ้ำแต่เนื้อหาต่างกัน "
+                        "กรุณาเปลี่ยนชื่อวิดีโอ "
+                        "และแก้ video_filename ใน JSON"
+                    )
+
+                count, used = conn.execute("""
+                    SELECT
+                        COUNT(*),
+                        COALESCE(SUM(size),0)
+                    FROM jobs
+                """).fetchone()
+
+                if (
+                    count >= MAX_VIDEOS
+                    or used + written
+                    > MAX_ACTIVE_BYTES
+                ):
+
+                    raise ValueError(
+                        "รอบปัจจุบันเต็ม "
+                        "(150 คลิป หรือ 1200 MB) "
+                        "กรุณาดาวน์โหลดแล้วล้างรอบ"
                     )
 
                 if (
-                    shutil.disk_usage(ROOT).free
-                    < size + 200 * 1024**2
+                    self.free_disk()
+                    < MIN_DISK_FREE + written
                 ):
+
                     raise ValueError(
-                        "พื้นที่ว่างบนเซิร์ฟเวอร์"
-                        "เหลือน้อยเกินไป"
+                        "พื้นที่ดิสก์เซิร์ฟเวอร์ไม่พอ"
                     )
 
-                if not saved.exists():
-                    os.replace(
-                        temp_name,
-                        saved,
-                    )
+                reference_found = (
+                    conn.execute("""
+                        SELECT 1
+                        FROM product_refs
+                        WHERE name_key=?
+                    """, (
+                        name_key,
+                    )).fetchone() is not None
+                )
 
-                con.execute("""
-                  INSERT INTO jobs(
-                    id,
-                    batch,
-                    filename,
-                    sha256,
-                    path,
-                    size,
-                    mode,
-                    model,
-                    status,
-                    created_at,
-                    updated_at
-                  )
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                job_id = uuid.uuid4().hex
+
+                destination = UPLOADS / (
+                    job_id
+                    + Path(filename).suffix.lower()
+                )
+
+                os.replace(
+                    temp,
+                    destination,
+                )
+
+                now = time.time()
+
+                conn.execute("""
+                    INSERT INTO jobs (
+                        id,
+                        name_key,
+                        filename,
+                        sha256,
+                        path,
+                        size,
+                        mode,
+                        model,
+                        status,
+                        added_at,
+                        updated_at
+                    )
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """, (
-                    uuid.uuid4().hex,
-                    batch_id,
-                    original,
+                    job_id,
+                    name_key,
+                    filename,
                     sha,
-                    str(saved),
-                    size,
+                    str(destination),
+                    written,
                     mode,
                     model,
-                    "QUEUED",
-                    time.time(),
-                    time.time(),
+                    (
+                        "QUEUED"
+                        if reference_found
+                        else "WAIT_JSON"
+                    ),
+                    now,
+                    now,
                 ))
 
             return True
 
         finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
 
-    def start(self):
-        self.paused.clear()
-
-    def stop(self):
-        self.paused.set()
-
-    def retry(self, batch_id: str):
-        with self.lock, closing(connection()) as con, con:
-            con.execute("""
-              UPDATE jobs
-              SET
-                status='QUEUED',
-                error=NULL,
-                updated_at=?
-              WHERE batch=?
-              AND status IN ('ERROR','WAITING')
-            """, (
-                time.time(),
-                batch_id,
-            ))
-
-        self.paused.clear()
-
-    def _take(self):
-        with self.lock, closing(connection()) as con, con:
-            con.execute("BEGIN IMMEDIATE")
-
-            job = con.execute("""
-              SELECT *
-              FROM jobs
-              WHERE status='QUEUED'
-              ORDER BY created_at
-              LIMIT 1
-            """).fetchone()
-
-            if job is None:
-                return None
-
-            con.execute("""
-              UPDATE jobs
-              SET status='RUNNING', updated_at=?
-              WHERE id=? AND status='QUEUED'
-            """, (
-                time.time(),
-                job["id"],
-            ))
-
-            return dict(job)
-
-    @staticmethod
-    def _cache_key(job):
-        return "|".join((
-            job["sha256"],
-            job["mode"],
-            job["model"],
-            ENGINE_VERSION,
-        ))
-
-    def _process(self, job):
-        key = self._cache_key(job)
-
-        with self.lock, closing(connection()) as con:
-            hit = con.execute("""
-              SELECT result_json
-              FROM cache
-              WHERE cache_key=?
-            """, (key,)).fetchone()
-
-        if hit:
-            result = json.loads(
-                hit["result_json"]
+            Path(temp).unlink(
+                missing_ok=True
             )
-            result["elapsed"] = 0.0
 
-        else:
-            if not self.api_key:
-                raise AnalysisError(
-                    "ไม่พบ GEMINI_API_KEY ใน Secrets"
+    # ==========================================
+    # SINGLE FILE OR ZIP UPLOAD
+    # ==========================================
+
+    def add_upload(
+        self,
+        uploaded,
+        mode,
+        model,
+    ):
+
+        filename = _name(uploaded.name)
+        extension = Path(filename).suffix.lower()
+
+        result = {
+            "video": 0,
+            "json": 0,
+            "duplicate": 0,
+            "errors": [],
+        }
+
+        def load_json(
+            stream,
+            json_name,
+            expected,
+        ):
+
+            if not 0 < expected <= MAX_JSON:
+
+                raise ValueError(
+                    "JSON เกิน 150 KB หรือว่าง"
                 )
 
-            result = inspect(
-                Path(job["path"]),
-                self.api_key,
-                job["model"],
-                job["mode"],
-                THUMBS / f"{job['sha256']}.jpg",
+            raw = stream.read(
+                MAX_JSON + 1
             )
 
-        with self.lock, closing(connection()) as con, con:
-            if not hit:
-                con.execute("""
-                  INSERT OR REPLACE
-                  INTO cache(
-                    cache_key,
-                    result_json,
-                    created_at
-                  )
-                  VALUES(?,?,?)
-                """, (
-                    key,
-                    json.dumps(
-                        result,
-                        ensure_ascii=False,
-                    ),
-                    time.time(),
-                ))
+            if len(raw) != expected:
 
-            con.execute("""
-              UPDATE jobs
-              SET
-                status='DONE',
-                verdict=?,
-                category=?,
-                reason=?,
-                details=?,
-                duration=?,
-                elapsed=?,
-                cache_hit=?,
-                error=NULL,
-                updated_at=?
-              WHERE id=?
+                raise ValueError(
+                    "JSON อัปโหลดไม่ครบหรือใหญ่เกิน"
+                )
+
+            added = self.add_json(
+                raw,
+                json_name,
+            )
+
+            result[
+                "json" if added else "duplicate"
+            ] += 1
+
+        def load_video(
+            stream,
+            video_name,
+            expected,
+        ):
+
+            added = self.add_video(
+                stream,
+                video_name,
+                expected,
+                mode,
+                model,
+            )
+
+            result[
+                "video" if added else "duplicate"
+            ] += 1
+
+        if extension != ".zip":
+
+            try:
+
+                uploaded.seek(0)
+
+                if extension == ".json":
+
+                    load_json(
+                        uploaded,
+                        filename,
+                        int(uploaded.size),
+                    )
+
+                elif extension in VIDEO_EXTS:
+
+                    load_video(
+                        uploaded,
+                        filename,
+                        int(uploaded.size),
+                    )
+
+                else:
+
+                    raise ValueError(
+                        "รองรับเฉพาะ JSON วิดีโอ หรือ ZIP"
+                    )
+
+            except Exception as exc:
+
+                result["errors"].append(
+                    f"{filename}: {exc}"
+                )
+
+            return result
+
+        if uploaded.size > MAX_ZIP:
+
+            result["errors"].append(
+                "ZIP ต้องไม่เกิน 100 MB"
+            )
+
+            return result
+
+        try:
+
+            uploaded.seek(0)
+
+            with zipfile.ZipFile(
+                uploaded
+            ) as archive:
+
+                files = [
+                    item
+                    for item in archive.infolist()
+                    if (
+                        not item.is_dir()
+                        and not item.filename.startswith(
+                            "__MACOSX/"
+                        )
+                    )
+                ]
+
+                if (
+                    len(files) > 250
+                    or sum(
+                        item.file_size
+                        for item in files
+                    ) > MAX_ZIP_EXPANDED
+                ):
+
+                    raise ValueError(
+                        "ZIP มีไฟล์มากเกินไป "
+                        "หรือมีขนาดหลังแตกเกิน 250 MB"
+                    )
+
+                # Read JSON first, then video.
+
+                files.sort(
+                    key=lambda item: (
+                        0
+                        if Path(
+                            item.filename
+                        ).suffix.lower() == ".json"
+                        else 1
+                    )
+                )
+
+                for item in files:
+
+                    child_name = _name(
+                        item.filename
+                    )
+
+                    suffix = Path(
+                        child_name
+                    ).suffix.lower()
+
+                    if (
+                        suffix not in VIDEO_EXTS
+                        and suffix != ".json"
+                    ):
+                        continue
+
+                    try:
+
+                        if item.flag_bits & 1:
+
+                            raise ValueError(
+                                "ZIP มีรหัสผ่าน"
+                            )
+
+                        if (
+                            suffix == ".json"
+                            and item.file_size > MAX_JSON
+                        ):
+
+                            raise ValueError(
+                                "JSON เกิน 150 KB"
+                            )
+
+                        if (
+                            suffix in VIDEO_EXTS
+                            and item.file_size > MAX_VIDEO
+                        ):
+
+                            raise ValueError(
+                                "วิดีโอเกิน 50 MB"
+                            )
+
+                        with archive.open(
+                            item
+                        ) as stream:
+
+                            if suffix == ".json":
+
+                                load_json(
+                                    stream,
+                                    child_name,
+                                    item.file_size,
+                                )
+
+                            else:
+
+                                load_video(
+                                    stream,
+                                    child_name,
+                                    item.file_size,
+                                )
+
+                    except Exception as exc:
+
+                        result["errors"].append(
+                            f"{child_name}: {exc}"
+                        )
+
+        except (
+            OSError,
+            zipfile.BadZipFile,
+            ValueError,
+        ) as exc:
+
+            result["errors"].append(
+                f"เปิด ZIP ไม่ได้: {exc}"
+            )
+
+        return result
+
+    # ==========================================
+    # START / PAUSE / RETRY
+    # ==========================================
+
+    def start(self):
+
+        self.paused.clear()
+
+    def pause(self):
+
+        self.paused.set()
+
+    def retry(self):
+
+        with self.lock, closing(_db()) as conn, conn:
+
+            conn.execute("""
+                UPDATE jobs
+                SET
+                    status='QUEUED',
+                    error=NULL,
+                    updated_at=?
+                WHERE status IN ('ERROR','WAITING')
             """, (
-                result["decision"],
-                result["video_type"],
-                result["reason_th"],
-                json.dumps(
-                    result,
-                    ensure_ascii=False,
-                ),
-                result["duration"],
-                result["elapsed"],
-                int(bool(hit)),
                 time.time(),
-                job["id"],
             ))
 
-    def _work(self):
-        while True:
+        self.start()
+
+    # ==========================================
+    # GET NEXT JOB
+    # ==========================================
+
+    def _take(self):
+
+        with self.lock, closing(_db()) as conn, conn:
+
             if self.paused.is_set():
-                time.sleep(0.7)
+                return None
+
+            conn.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            row = conn.execute("""
+                SELECT
+                    j.*,
+                    p.reference_text
+                FROM jobs j
+                JOIN product_refs p
+                ON j.name_key=p.name_key
+                WHERE j.status='QUEUED'
+                ORDER BY j.added_at,j.id
+                LIMIT 1
+            """).fetchone()
+
+            if not row:
+                return None
+
+            conn.execute("""
+                UPDATE jobs
+                SET
+                    status='RUNNING',
+                    updated_at=?
+                WHERE id=?
+            """, (
+                time.time(),
+                row["id"],
+            ))
+
+            return dict(row)
+
+    # ==========================================
+    # VIDEO ANALYSIS WORKER
+    # ==========================================
+
+    def _work(self):
+
+        while True:
+
+            if self.paused.is_set():
+
+                time.sleep(0.6)
                 continue
 
-            job = self._take()
+            task = self._take()
 
-            if job is None:
+            if not task:
+
                 time.sleep(0.8)
                 continue
 
             try:
-                self._process(job)
+
+                if not self.api_key:
+
+                    raise AnalysisError(
+                        "ไม่พบ GEMINI_API_KEY"
+                    )
+
+                # Important:
+                # Send matched JSON product data
+                # into V3.4 video inspection.
+
+                result = inspect(
+                    Path(task["path"]),
+                    self.api_key,
+                    task["model"],
+                    task["mode"],
+                    THUMBS / (
+                        f"{task['sha256']}.jpg"
+                    ),
+                    reference=task["reference_text"],
+                )
+
+                if result.get("decision") not in (
+                    "PASS",
+                    "FAIL",
+                ):
+
+                    raise AnalysisError(
+                        "ตัวตรวจไม่ได้ส่ง PASS หรือ FAIL"
+                    )
+
+                with self.lock, closing(_db()) as conn, conn:
+
+                    conn.execute("""
+                        UPDATE jobs
+                        SET
+                            status='DONE',
+                            verdict=?,
+                            category=?,
+                            reason=?,
+                            details=?,
+                            duration=?,
+                            elapsed=?,
+                            error=NULL,
+                            updated_at=?
+                        WHERE id=?
+                        AND status='RUNNING'
+                    """, (
+                        result["decision"],
+                        result.get(
+                            "video_type", ""
+                        ),
+                        result.get(
+                            "reason_th", ""
+                        ),
+                        json.dumps(
+                            result,
+                            ensure_ascii=False,
+                        ),
+                        result.get(
+                            "duration", 0
+                        ),
+                        result.get(
+                            "elapsed", 0
+                        ),
+                        time.time(),
+                        task["id"],
+                    ))
 
             except QuotaError as exc:
+
                 self._mark_failure(
-                    job,
+                    task["id"],
                     "WAITING",
                     str(exc),
                 )
-                self.paused.set()
+
+                self.pause()
 
             except Exception as exc:
+
                 self._mark_failure(
-                    job,
+                    task["id"],
                     "ERROR",
-                    str(exc)[:900],
+                    str(exc),
                 )
 
-    def _mark_failure(self, job, status, error):
-        with self.lock, closing(connection()) as con, con:
-            con.execute("""
-              UPDATE jobs
-              SET
-                status=?,
-                error=?,
-                updated_at=?
-              WHERE id=?
+    # ==========================================
+    # ERROR HANDLING
+    # ==========================================
+
+    def _mark_failure(
+        self,
+        job_id,
+        status,
+        message,
+    ):
+
+        with self.lock, closing(_db()) as conn, conn:
+
+            conn.execute("""
+                UPDATE jobs
+                SET
+                    status=?,
+                    error=?,
+                    updated_at=?
+                WHERE id=?
+                AND status='RUNNING'
             """, (
                 status,
-                error,
+                str(message)[:650],
                 time.time(),
-                job["id"],
+                job_id,
             ))
 
-    def cleanup(self, older_than_days=7):
-        cutoff = (
-            time.time()
-            - older_than_days * 86400
+    # ==========================================
+    # CLEAR CURRENT ROUND
+    # ==========================================
+
+    def clear_round(self):
+
+        self.pause()
+
+        with self.lock, closing(_db()) as conn, conn:
+
+            conn.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            running = conn.execute("""
+                SELECT COUNT(*)
+                FROM jobs
+                WHERE status='RUNNING'
+            """).fetchone()[0]
+
+            if running:
+
+                raise ValueError(
+                    "ยังมีคลิปกำลังตรวจ "
+                    "รอให้คลิปนั้นจบก่อนล้างรอบ"
+                )
+
+            conn.execute(
+                "DELETE FROM jobs"
+            )
+
+            conn.execute(
+                "DELETE FROM product_refs"
+            )
+
+            for folder in (
+                UPLOADS,
+                THUMBS,
+                EXPORTS,
+            ):
+
+                for file in folder.iterdir():
+
+                    if file.is_file():
+
+                        file.unlink(
+                            missing_ok=True
+                        )
+
+        with self.lock, closing(_db()) as conn:
+
+            conn.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            )
+
+            conn.execute(
+                "VACUUM"
+            )
+
+    # ==========================================
+    # CLEAR LEGACY DATA
+    # ==========================================
+
+    def clear_legacy(self):
+        """
+        Remove previous V3 data only when
+        the user explicitly confirms.
+        """
+
+        self.pause()
+
+        old_dirs = (
+            ROOT / "uploads",
+            ROOT / "thumbnails",
+            ROOT / "active_only",
         )
 
-        with self.lock, closing(connection()) as con:
-            old_paths = [
-                r[0]
-                for r in con.execute("""
-                  SELECT path
-                  FROM jobs
-                  GROUP BY path
-                  HAVING
-                    MAX(CASE
-                      WHEN status IN (
-                        'QUEUED',
-                        'RUNNING',
-                        'WAITING'
-                      )
-                      THEN 1 ELSE 0
-                    END)=0
-                  AND MAX(updated_at) < ?
-                """, (cutoff,))
-            ]
+        old_files = (
+            ROOT / "queue.sqlite3",
+            ROOT / "queue.sqlite3-wal",
+            ROOT / "queue.sqlite3-shm",
+        )
 
-            removed = 0
+        for folder in old_dirs:
 
-            for file in old_paths:
-                p = Path(file)
+            if folder.is_dir():
 
-                if (
-                    p.is_file()
-                    and p.parent == UPLOADS
-                ):
-                    p.unlink()
-                    removed += 1
+                shutil.rmtree(folder)
 
-            return removed
+        for path in old_files:
 
-    def disk_usage(self):
-        return shutil.disk_usage(ROOT)
+            path.unlink(
+                missing_ok=True
+            )
