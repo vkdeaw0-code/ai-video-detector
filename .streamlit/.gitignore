@@ -1,6 +1,0 @@
-
-.streamlit/secrets.toml
-.env
-runtime_data/
-__pycache__/
-*.pyc
