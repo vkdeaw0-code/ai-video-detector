@@ -1,9 +1,4 @@
 
-streamlit>=1.49,<2
-opencv-python-headless>=4.8,<5
-numpy>=1.26,<3
+streamlit>=1.44,<2
 Pillow>=10,<13
-pandas>=2,<3
-imageio-ffmpeg>=0.5,<1
-google-genai>=1.30,<2
-pydantic>=2.10,<3
+requests>=2.31,<3
