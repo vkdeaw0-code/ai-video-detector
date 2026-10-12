@@ -1,13 +1,8 @@
 
-"""AI Video QC V3.5 — One-Drop JSON + MP4 Queue.
+"""V3.9 Hybrid queue.
 
-- Up to 150 videos per round
-- One JSON per video
-- Max 1200 MB total video storage
-- Streamed file processing
-- JSON matched by video_filename
-- No historical AI result cache
-- Compatible with V3.4 qc_core.py
+MP4 alone or MP4 with optional product JSON.
+Current round only. PASS / FAIL / REVIEW.
 """
 
 from __future__ import annotations
@@ -27,16 +22,8 @@ import zipfile
 from contextlib import closing
 from pathlib import Path
 
-from qc_core import (
-    AnalysisError,
-    QuotaError,
-    inspect,
-)
+from qc_core import AnalysisError, QuotaError, inspect
 
-
-# ==============================================
-# SETTINGS
-# ==============================================
 
 ROOT = Path(
     os.getenv("QC_DATA_DIR", "runtime_data")
@@ -59,28 +46,16 @@ VIDEO_EXTS = {
 MAX_VIDEO = 50 * 1024**2
 MAX_ZIP = 100 * 1024**2
 MAX_JSON = 150 * 1024
-
 MAX_ZIP_EXPANDED = 250 * 1024**2
 
-# Maximum number of videos per round
-MAX_VIDEOS = 150
-
-# Maximum total video size: 1200 MB
 MAX_ACTIVE_BYTES = 1200 * 1024**2
-
-# Keep some free disk space
+MAX_VIDEOS = 150
 MIN_DISK_FREE = 260 * 1024**2
 
 
-# ==============================================
-# DATABASE HELPERS
-# ==============================================
-
 def _db():
-
     conn = sqlite3.connect(
-        DB,
-        timeout=30,
+        DB, timeout=30
     )
 
     conn.row_factory = sqlite3.Row
@@ -93,7 +68,6 @@ def _db():
 
 
 def _name(value):
-
     raw = unicodedata.normalize(
         "NFC",
         str(value or "").replace("\\", "/"),
@@ -103,18 +77,10 @@ def _name(value):
 
 
 def _key(value):
-
     return _name(value).casefold()
 
 
 def _reference_text(data):
-    """
-    Create product reference for Gemini.
-
-    The V3.4 core currently reads
-    the first 900 characters.
-    """
-
     title = str(
         data.get("title", "")
     ).strip()[:370]
@@ -132,10 +98,12 @@ def _reference_text(data):
         "category",
         "specifications",
     ):
-
         value = data.get(field)
 
-        if value is not None and value != "":
+        if (
+            value is not None
+            and value != ""
+        ):
             extras[field] = value
 
     specs = json.dumps(
@@ -151,21 +119,15 @@ def _reference_text(data):
     )[:890]
 
 
-# ==============================================
-# ACTIVE QUEUE
-# ==============================================
-
 class ActiveQueue:
 
     def __init__(self, api_key):
-
         for folder in (
             ACTIVE,
             UPLOADS,
             THUMBS,
             EXPORTS,
         ):
-
             folder.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -179,7 +141,6 @@ class ActiveQueue:
         self.paused.set()
 
         with self.lock, closing(_db()) as conn:
-
             conn.execute(
                 "PRAGMA journal_mode=WAL"
             )
@@ -218,13 +179,12 @@ class ActiveQueue:
                     updated_at REAL NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS
-                    jobs_status_idx
+                CREATE INDEX IF NOT EXISTS jobs_status_idx
                 ON jobs(status, added_at);
 
                 UPDATE jobs
                 SET status='QUEUED'
-                WHERE status='RUNNING';
+                WHERE status IN ('RUNNING','WAIT_JSON');
             """)
 
             conn.commit()
@@ -236,22 +196,15 @@ class ActiveQueue:
 
         self.worker.start()
 
-    # ==========================================
-    # API KEY
-    # ==========================================
-
     def update_key(self, api_key):
-
         self.api_key = api_key
 
     # ==========================================
-    # JOB LIST
+    # QUERY CURRENT ROUND
     # ==========================================
 
     def jobs(self):
-
         with self.lock, closing(_db()) as conn:
-
             return [
                 dict(row)
                 for row in conn.execute("""
@@ -267,14 +220,8 @@ class ActiveQueue:
                 """)
             ]
 
-    # ==========================================
-    # STATISTICS
-    # ==========================================
-
     def stats(self):
-
         with self.lock, closing(_db()) as conn:
-
             count, used = conn.execute("""
                 SELECT
                     COUNT(*),
@@ -294,9 +241,7 @@ class ActiveQueue:
             )
 
     def unmatched_references(self):
-
         with self.lock, closing(_db()) as conn:
-
             return [
                 dict(row)
                 for row in conn.execute("""
@@ -312,11 +257,10 @@ class ActiveQueue:
             ]
 
     def free_disk(self):
-
         return shutil.disk_usage(ROOT).free
 
     # ==========================================
-    # ADD JSON
+    # JSON OPTIONAL
     # ==========================================
 
     def add_json(
@@ -324,30 +268,28 @@ class ActiveQueue:
         raw,
         filename="product.json",
     ):
-
         if not 0 < len(raw) <= MAX_JSON:
-
             raise ValueError(
                 "JSON ต้องมีขนาด 1–150 KB"
             )
 
         try:
-
             data = json.loads(
                 raw.decode("utf-8-sig")
             )
 
-        except (UnicodeError, ValueError) as exc:
-
+        except (
+            UnicodeError,
+            ValueError,
+        ) as exc:
             raise ValueError(
                 f"อ่าน JSON ไม่สำเร็จ: {exc}"
             ) from exc
 
         if not isinstance(data, dict):
-
             raise ValueError(
                 "JSON ต้องเป็น object "
-                "ที่มี title และ video_filename"
+                "มี title และ video_filename"
             )
 
         video_name = _name(
@@ -359,10 +301,9 @@ class ActiveQueue:
             or Path(video_name).suffix.lower()
             not in VIDEO_EXTS
         ):
-
             raise ValueError(
                 "ต้องมี video_filename "
-                "ลงท้ายด้วยนามสกุลวิดีโอ"
+                "ลงท้ายด้วยไฟล์วิดีโอ"
             )
 
         title = data.get("title")
@@ -371,20 +312,22 @@ class ActiveQueue:
             not isinstance(title, str)
             or not title.strip()
         ):
-
             raise ValueError(
-                "JSON ต้องมี title "
-                "เป็นชื่อสินค้าที่ไม่ว่าง"
+                "JSON ต้องมี title"
             )
 
-        caption = data.get("caption", "")
-        link = data.get("product_link", "")
+        caption = data.get(
+            "caption", ""
+        )
+
+        link = data.get(
+            "product_link", ""
+        )
 
         if (
             not isinstance(caption, str)
             or not isinstance(link, str)
         ):
-
             raise ValueError(
                 "caption และ product_link "
                 "ต้องเป็นข้อความ"
@@ -400,8 +343,11 @@ class ActiveQueue:
             reference_text.encode("utf-8")
         ).hexdigest()
 
-        with self.lock, closing(_db()) as conn, conn:
-
+        with (
+            self.lock,
+            closing(_db()) as conn,
+            conn,
+        ):
             conn.execute(
                 "BEGIN IMMEDIATE"
             )
@@ -418,29 +364,10 @@ class ActiveQueue:
                 existing
                 and existing["json_digest"] == digest
             ):
-
                 return False
 
-            busy = conn.execute("""
-                SELECT status
-                FROM jobs
-                WHERE name_key=?
-            """, (
-                name_key,
-            )).fetchone()
-
-            if (
-                busy
-                and busy["status"] == "RUNNING"
-            ):
-
-                raise ValueError(
-                    "คลิปนี้กำลังตรวจอยู่ "
-                    "กรุณารอให้จบก่อนเปลี่ยน JSON"
-                )
-
             conn.execute("""
-                INSERT INTO product_refs (
+                INSERT INTO product_refs(
                     name_key,
                     video_filename,
                     json_filename,
@@ -451,7 +378,7 @@ class ActiveQueue:
                     json_digest,
                     added_at
                 )
-                VALUES (?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?)
 
                 ON CONFLICT(name_key)
                 DO UPDATE SET
@@ -475,11 +402,9 @@ class ActiveQueue:
                 time.time(),
             ))
 
-            # JSON arrives after video:
-            # release the matching job.
-
-            # If JSON changes after inspection:
-            # invalidate the previous verdict.
+            # Completed MP4 becomes QUEUED again.
+            # For RUNNING clips, revision is checked
+            # when the current AI call finishes.
 
             conn.execute("""
                 UPDATE jobs
@@ -503,7 +428,7 @@ class ActiveQueue:
         return True
 
     # ==========================================
-    # ADD VIDEO
+    # VIDEO OPTIONAL REFERENCE
     # ==========================================
 
     def add_video(
@@ -514,22 +439,19 @@ class ActiveQueue:
         mode,
         model,
     ):
-
         filename = _name(filename)
 
         if (
             Path(filename).suffix.lower()
             not in VIDEO_EXTS
         ):
-
             raise ValueError(
                 "ไม่รองรับไฟล์วิดีโอนี้"
             )
 
         if not 0 < size <= MAX_VIDEO:
-
             raise ValueError(
-                "วิดีโอแต่ละไฟล์ต้องไม่เกิน 50 MB"
+                "วิดีโอต้องไม่เกิน 50MB"
             )
 
         fd, temp = tempfile.mkstemp(
@@ -541,11 +463,8 @@ class ActiveQueue:
         written = 0
 
         try:
-
             with os.fdopen(fd, "wb") as output:
-
                 while True:
-
                     chunk = stream.read(
                         1024 * 1024
                     )
@@ -556,26 +475,26 @@ class ActiveQueue:
                     written += len(chunk)
 
                     if written > MAX_VIDEO:
-
                         raise ValueError(
-                            "วิดีโอเกิน 50 MB"
+                            "วิดีโอเกิน 50MB"
                         )
 
                     output.write(chunk)
                     digest.update(chunk)
 
             if written != size:
-
                 raise ValueError(
-                    "ไฟล์อัปโหลดไม่ครบ "
-                    "กรุณาลองใหม่"
+                    "ไฟล์อัปโหลดไม่ครบ"
                 )
 
             sha = digest.hexdigest()
             name_key = _key(filename)
 
-            with self.lock, closing(_db()) as conn, conn:
-
+            with (
+                self.lock,
+                closing(_db()) as conn,
+                conn,
+            ):
                 conn.execute(
                     "BEGIN IMMEDIATE"
                 )
@@ -589,14 +508,12 @@ class ActiveQueue:
                 )).fetchone()
 
                 if old:
-
                     if old["sha256"] == sha:
                         return False
 
                     raise ValueError(
-                        "ชื่อวิดีโอซ้ำแต่เนื้อหาต่างกัน "
-                        "กรุณาเปลี่ยนชื่อวิดีโอ "
-                        "และแก้ video_filename ใน JSON"
+                        "ชื่อ MP4 ซ้ำแต่เนื้อหาต่างกัน "
+                        "ให้เปลี่ยนชื่อไฟล์"
                     )
 
                 count, used = conn.execute("""
@@ -611,31 +528,18 @@ class ActiveQueue:
                     or used + written
                     > MAX_ACTIVE_BYTES
                 ):
-
                     raise ValueError(
-                        "รอบปัจจุบันเต็ม "
-                        "(150 คลิป หรือ 1200 MB) "
-                        "กรุณาดาวน์โหลดแล้วล้างรอบ"
+                        "รอบนี้เต็ม 150 คลิป "
+                        "หรือพื้นที่รวม 1200MB"
                     )
 
                 if (
                     self.free_disk()
-                    < MIN_DISK_FREE + written
+                    < MIN_DISK_FREE
                 ):
-
                     raise ValueError(
-                        "พื้นที่ดิสก์เซิร์ฟเวอร์ไม่พอ"
+                        "ดิสก์เซิร์ฟเวอร์ไม่พอ"
                     )
-
-                reference_found = (
-                    conn.execute("""
-                        SELECT 1
-                        FROM product_refs
-                        WHERE name_key=?
-                    """, (
-                        name_key,
-                    )).fetchone() is not None
-                )
 
                 job_id = uuid.uuid4().hex
 
@@ -651,8 +555,11 @@ class ActiveQueue:
 
                 now = time.time()
 
+                # KEY CHANGE:
+                # MP4 is QUEUED with or without JSON.
+
                 conn.execute("""
-                    INSERT INTO jobs (
+                    INSERT INTO jobs(
                         id,
                         name_key,
                         filename,
@@ -665,7 +572,7 @@ class ActiveQueue:
                         added_at,
                         updated_at
                     )
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     job_id,
                     name_key,
@@ -675,11 +582,7 @@ class ActiveQueue:
                     written,
                     mode,
                     model,
-                    (
-                        "QUEUED"
-                        if reference_found
-                        else "WAIT_JSON"
-                    ),
+                    "QUEUED",
                     now,
                     now,
                 ))
@@ -687,13 +590,12 @@ class ActiveQueue:
             return True
 
         finally:
-
             Path(temp).unlink(
                 missing_ok=True
             )
 
     # ==========================================
-    # SINGLE FILE OR ZIP UPLOAD
+    # LEGACY SINGLE / ZIP UPLOAD
     # ==========================================
 
     def add_upload(
@@ -702,9 +604,8 @@ class ActiveQueue:
         mode,
         model,
     ):
-
-        filename = _name(uploaded.name)
-        extension = Path(filename).suffix.lower()
+        name = _name(uploaded.name)
+        ext = Path(name).suffix.lower()
 
         result = {
             "video": 0,
@@ -718,11 +619,9 @@ class ActiveQueue:
             json_name,
             expected,
         ):
-
             if not 0 < expected <= MAX_JSON:
-
                 raise ValueError(
-                    "JSON เกิน 150 KB หรือว่าง"
+                    "JSON เกิน 150KB หรือว่าง"
                 )
 
             raw = stream.read(
@@ -730,9 +629,8 @@ class ActiveQueue:
             )
 
             if len(raw) != expected:
-
                 raise ValueError(
-                    "JSON อัปโหลดไม่ครบหรือใหญ่เกิน"
+                    "JSON อัปโหลดไม่ครบ"
                 )
 
             added = self.add_json(
@@ -749,7 +647,6 @@ class ActiveQueue:
             video_name,
             expected,
         ):
-
             added = self.add_video(
                 stream,
                 video_name,
@@ -762,58 +659,49 @@ class ActiveQueue:
                 "video" if added else "duplicate"
             ] += 1
 
-        if extension != ".zip":
-
+        if ext != ".zip":
             try:
-
                 uploaded.seek(0)
 
-                if extension == ".json":
-
+                if ext == ".json":
                     load_json(
                         uploaded,
-                        filename,
+                        name,
                         int(uploaded.size),
                     )
 
-                elif extension in VIDEO_EXTS:
-
+                elif ext in VIDEO_EXTS:
                     load_video(
                         uploaded,
-                        filename,
+                        name,
                         int(uploaded.size),
                     )
 
                 else:
-
                     raise ValueError(
-                        "รองรับเฉพาะ JSON วิดีโอ หรือ ZIP"
+                        "รองรับ JSON, MP4 หรือ ZIP"
                     )
 
             except Exception as exc:
-
                 result["errors"].append(
-                    f"{filename}: {exc}"
+                    f"{name}: {exc}"
                 )
 
             return result
 
         if uploaded.size > MAX_ZIP:
-
             result["errors"].append(
-                "ZIP ต้องไม่เกิน 100 MB"
+                "ZIP ต้องไม่เกิน 100MB"
             )
 
             return result
 
         try:
-
             uploaded.seek(0)
 
             with zipfile.ZipFile(
                 uploaded
             ) as archive:
-
                 files = [
                     item
                     for item in archive.infolist()
@@ -825,21 +713,21 @@ class ActiveQueue:
                     )
                 ]
 
+                total = sum(
+                    item.file_size
+                    for item in files
+                )
+
                 if (
                     len(files) > 250
-                    or sum(
-                        item.file_size
-                        for item in files
-                    ) > MAX_ZIP_EXPANDED
+                    or total > MAX_ZIP_EXPANDED
                 ):
-
                     raise ValueError(
-                        "ZIP มีไฟล์มากเกินไป "
-                        "หรือมีขนาดหลังแตกเกิน 250 MB"
+                        "ZIP มีไฟล์มาก "
+                        "หรือขนาดหลังแตกเกิน 250MB"
                     )
 
-                # Read JSON first, then video.
-
+                # JSON before videos.
                 files.sort(
                     key=lambda item: (
                         0
@@ -851,13 +739,12 @@ class ActiveQueue:
                 )
 
                 for item in files:
-
-                    child_name = _name(
+                    child = _name(
                         item.filename
                     )
 
                     suffix = Path(
-                        child_name
+                        child
                     ).suffix.lower()
 
                     if (
@@ -867,9 +754,7 @@ class ActiveQueue:
                         continue
 
                     try:
-
                         if item.flag_bits & 1:
-
                             raise ValueError(
                                 "ZIP มีรหัสผ่าน"
                             )
@@ -878,44 +763,38 @@ class ActiveQueue:
                             suffix == ".json"
                             and item.file_size > MAX_JSON
                         ):
-
                             raise ValueError(
-                                "JSON เกิน 150 KB"
+                                "JSON เกิน 150KB"
                             )
 
                         if (
                             suffix in VIDEO_EXTS
                             and item.file_size > MAX_VIDEO
                         ):
-
                             raise ValueError(
-                                "วิดีโอเกิน 50 MB"
+                                "วิดีโอเกิน 50MB"
                             )
 
                         with archive.open(
                             item
-                        ) as stream:
-
+                        ) as source:
                             if suffix == ".json":
-
                                 load_json(
-                                    stream,
-                                    child_name,
+                                    source,
+                                    child,
                                     item.file_size,
                                 )
 
                             else:
-
                                 load_video(
-                                    stream,
-                                    child_name,
+                                    source,
+                                    child,
                                     item.file_size,
                                 )
 
                     except Exception as exc:
-
                         result["errors"].append(
-                            f"{child_name}: {exc}"
+                            f"{child}: {exc}"
                         )
 
         except (
@@ -923,7 +802,6 @@ class ActiveQueue:
             zipfile.BadZipFile,
             ValueError,
         ) as exc:
-
             result["errors"].append(
                 f"เปิด ZIP ไม่ได้: {exc}"
             )
@@ -931,42 +809,43 @@ class ActiveQueue:
         return result
 
     # ==========================================
-    # START / PAUSE / RETRY
+    # QUEUE CONTROL
     # ==========================================
 
     def start(self):
-
         self.paused.clear()
 
     def pause(self):
-
         self.paused.set()
 
     def retry(self):
-
-        with self.lock, closing(_db()) as conn, conn:
-
+        with (
+            self.lock,
+            closing(_db()) as conn,
+            conn,
+        ):
             conn.execute("""
                 UPDATE jobs
                 SET
                     status='QUEUED',
                     error=NULL,
                     updated_at=?
-                WHERE status IN ('ERROR','WAITING')
+                WHERE status IN (
+                    'ERROR',
+                    'WAITING'
+                )
             """, (
                 time.time(),
             ))
 
         self.start()
 
-    # ==========================================
-    # GET NEXT JOB
-    # ==========================================
-
     def _take(self):
-
-        with self.lock, closing(_db()) as conn, conn:
-
+        with (
+            self.lock,
+            closing(_db()) as conn,
+            conn,
+        ):
             if self.paused.is_set():
                 return None
 
@@ -974,12 +853,20 @@ class ActiveQueue:
                 "BEGIN IMMEDIATE"
             )
 
+            # LEFT JOIN: JSON is optional.
             row = conn.execute("""
                 SELECT
                     j.*,
-                    p.reference_text
+                    COALESCE(
+                        p.reference_text,
+                        ''
+                    ) AS reference_text,
+                    COALESCE(
+                        p.json_digest,
+                        ''
+                    ) AS ref_digest
                 FROM jobs j
-                JOIN product_refs p
+                LEFT JOIN product_refs p
                 ON j.name_key=p.name_key
                 WHERE j.status='QUEUED'
                 ORDER BY j.added_at,j.id
@@ -1003,36 +890,26 @@ class ActiveQueue:
             return dict(row)
 
     # ==========================================
-    # VIDEO ANALYSIS WORKER
+    # BACKGROUND WORKER
     # ==========================================
 
     def _work(self):
-
         while True:
-
             if self.paused.is_set():
-
                 time.sleep(0.6)
                 continue
 
             task = self._take()
 
             if not task:
-
                 time.sleep(0.8)
                 continue
 
             try:
-
                 if not self.api_key:
-
                     raise AnalysisError(
                         "ไม่พบ GEMINI_API_KEY"
                     )
-
-                # Important:
-                # Send matched JSON product data
-                # into V3.4 video inspection.
 
                 result = inspect(
                     Path(task["path"]),
@@ -1048,52 +925,95 @@ class ActiveQueue:
                 if result.get("decision") not in (
                     "PASS",
                     "FAIL",
+                    "REVIEW",
                 ):
-
                     raise AnalysisError(
-                        "ตัวตรวจไม่ได้ส่ง PASS หรือ FAIL"
+                        "ตัวตรวจต้องส่ง "
+                        "PASS / FAIL / REVIEW"
                     )
 
-                with self.lock, closing(_db()) as conn, conn:
-
-                    conn.execute("""
-                        UPDATE jobs
-                        SET
-                            status='DONE',
-                            verdict=?,
-                            category=?,
-                            reason=?,
-                            details=?,
-                            duration=?,
-                            elapsed=?,
-                            error=NULL,
-                            updated_at=?
-                        WHERE id=?
-                        AND status='RUNNING'
+                with (
+                    self.lock,
+                    closing(_db()) as conn,
+                    conn,
+                ):
+                    latest = conn.execute("""
+                        SELECT
+                            COALESCE(
+                                p.json_digest,
+                                ''
+                            )
+                        FROM jobs j
+                        LEFT JOIN product_refs p
+                        ON j.name_key=p.name_key
+                        WHERE j.id=?
                     """, (
-                        result["decision"],
-                        result.get(
-                            "video_type", ""
-                        ),
-                        result.get(
-                            "reason_th", ""
-                        ),
-                        json.dumps(
-                            result,
-                            ensure_ascii=False,
-                        ),
-                        result.get(
-                            "duration", 0
-                        ),
-                        result.get(
-                            "elapsed", 0
-                        ),
-                        time.time(),
                         task["id"],
-                    ))
+                    )).fetchone()
+
+                    # JSON changed while running:
+                    # do not keep the outdated result.
+
+                    if (
+                        latest
+                        and latest[0]
+                        != task["ref_digest"]
+                    ):
+                        conn.execute("""
+                            UPDATE jobs
+                            SET
+                                status='QUEUED',
+                                verdict=NULL,
+                                reason=NULL,
+                                details=NULL,
+                                elapsed=NULL,
+                                error=NULL,
+                                updated_at=?
+                            WHERE id=?
+                            AND status='RUNNING'
+                        """, (
+                            time.time(),
+                            task["id"],
+                        ))
+
+                    else:
+                        conn.execute("""
+                            UPDATE jobs
+                            SET
+                                status='DONE',
+                                verdict=?,
+                                category=?,
+                                reason=?,
+                                details=?,
+                                duration=?,
+                                elapsed=?,
+                                error=NULL,
+                                updated_at=?
+                            WHERE id=?
+                            AND status='RUNNING'
+                        """, (
+                            result["decision"],
+                            result.get(
+                                "video_type", ""
+                            ),
+                            result.get(
+                                "reason_th", ""
+                            ),
+                            json.dumps(
+                                result,
+                                ensure_ascii=False,
+                            ),
+                            result.get(
+                                "duration", 0
+                            ),
+                            result.get(
+                                "elapsed", 0
+                            ),
+                            time.time(),
+                            task["id"],
+                        ))
 
             except QuotaError as exc:
-
                 self._mark_failure(
                     task["id"],
                     "WAITING",
@@ -1103,16 +1023,11 @@ class ActiveQueue:
                 self.pause()
 
             except Exception as exc:
-
                 self._mark_failure(
                     task["id"],
                     "ERROR",
                     str(exc),
                 )
-
-    # ==========================================
-    # ERROR HANDLING
-    # ==========================================
 
     def _mark_failure(
         self,
@@ -1120,9 +1035,11 @@ class ActiveQueue:
         status,
         message,
     ):
-
-        with self.lock, closing(_db()) as conn, conn:
-
+        with (
+            self.lock,
+            closing(_db()) as conn,
+            conn,
+        ):
             conn.execute("""
                 UPDATE jobs
                 SET
@@ -1139,15 +1056,17 @@ class ActiveQueue:
             ))
 
     # ==========================================
-    # CLEAR CURRENT ROUND
+    # CLEANUP
     # ==========================================
 
     def clear_round(self):
-
         self.pause()
 
-        with self.lock, closing(_db()) as conn, conn:
-
+        with (
+            self.lock,
+            closing(_db()) as conn,
+            conn,
+        ):
             conn.execute(
                 "BEGIN IMMEDIATE"
             )
@@ -1159,10 +1078,9 @@ class ActiveQueue:
             """).fetchone()[0]
 
             if running:
-
                 raise ValueError(
-                    "ยังมีคลิปกำลังตรวจ "
-                    "รอให้คลิปนั้นจบก่อนล้างรอบ"
+                    "มีคลิปกำลังตรวจ "
+                    "รอให้จบก่อนล้างรอบ"
                 )
 
             conn.execute(
@@ -1178,35 +1096,20 @@ class ActiveQueue:
                 THUMBS,
                 EXPORTS,
             ):
-
                 for file in folder.iterdir():
-
                     if file.is_file():
-
                         file.unlink(
                             missing_ok=True
                         )
 
         with self.lock, closing(_db()) as conn:
-
             conn.execute(
                 "PRAGMA wal_checkpoint(TRUNCATE)"
             )
 
-            conn.execute(
-                "VACUUM"
-            )
-
-    # ==========================================
-    # CLEAR LEGACY DATA
-    # ==========================================
+            conn.execute("VACUUM")
 
     def clear_legacy(self):
-        """
-        Remove previous V3 data only when
-        the user explicitly confirms.
-        """
-
         self.pause()
 
         old_dirs = (
@@ -1221,14 +1124,11 @@ class ActiveQueue:
             ROOT / "queue.sqlite3-shm",
         )
 
-        for folder in old_dirs:
-
-            if folder.is_dir():
-
-                shutil.rmtree(folder)
+        for path in old_dirs:
+            if path.is_dir():
+                shutil.rmtree(path)
 
         for path in old_files:
-
             path.unlink(
                 missing_ok=True
             )
