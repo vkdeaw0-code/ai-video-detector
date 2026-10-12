@@ -1,6 +1,9 @@
 
 .streamlit/secrets.toml
-.env
-runtime_data/
 __pycache__/
 *.pyc
+.venv/
+*.mp4
+*.mov
+*.webm
+*_results.csv
