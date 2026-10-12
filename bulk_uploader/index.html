@@ -5,89 +5,102 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-* {
-  box-sizing: border-box;
-}
-body {
-  font: 15px system-ui, sans-serif;
-  margin: 0;
-  color: #172033;
-}
-.drop {
-  border: 2px dashed #4486db;
-  border-radius: 14px;
-  padding: 24px;
-  text-align: center;
-  background: #f5f9ff;
-  cursor: pointer;
-}
-.drop.over {
-  background: #e1efff;
-  border-color: #165bbb;
-}
-.drop strong {
-  font-size: 18px;
-}
-.meta {
-  color: #56677f;
-  font-size: 13px;
-  margin-top: 7px;
-}
-.tools {
-  display: flex;
-  gap: 8px;
-  margin: 12px 0;
-}
-button {
-  background: #246bd4;
-  color: white;
-  border: 0;
-  border-radius: 8px;
-  padding: 9px 15px;
-  cursor: pointer;
-}
-button:disabled {
-  opacity: 0.5;
-}
-button.cancel {
-  background: #e9edf4;
-  color: #29405a;
-}
-progress {
-  width: 100%;
-  height: 17px;
-  accent-color: #2573dc;
-}
-#status {
-  margin: 9px 0;
-  white-space: pre-wrap;
-}
-#errors {
-  font-size: 13px;
-  color: #a33434;
-  max-height: 120px;
-  overflow: auto;
-  white-space: pre-wrap;
-}
-#files {
-  font-size: 13px;
-  color: #3d556e;
-}
+  *{box-sizing:border-box}
+  body{
+    font:15px system-ui,-apple-system,sans-serif;
+    margin:0;color:#172033
+  }
+  .drop{
+    border:2px dashed #4486db;
+    border-radius:14px;
+    padding:24px;
+    text-align:center;
+    background:#f5f9ff;
+    cursor:pointer
+  }
+  .drop.over{
+    background:#e1efff;
+    border-color:#165bbb
+  }
+  .drop strong{font-size:18px}
+  .meta{
+    color:#56677f;
+    font-size:13px;
+    margin-top:7px
+  }
+  .tools{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    margin:12px 0
+  }
+  button{
+    background:#246bd4;
+    color:white;
+    border:0;
+    border-radius:8px;
+    padding:9px 15px;
+    cursor:pointer;
+    font-weight:600
+  }
+  button[disabled]{
+    opacity:.5;
+    cursor:not-allowed
+  }
+  button.cancel{
+    background:#e9edf4;
+    color:#29405a
+  }
+  progress{
+    width:100%;
+    height:17px;
+    accent-color:#2573dc
+  }
+  #status{
+    margin:9px 0;
+    white-space:pre-wrap
+  }
+  #errors{
+    font-size:13px;
+    color:#a33434;
+    max-height:120px;
+    overflow:auto;
+    white-space:pre-wrap
+  }
+  #files{
+    font-size:13px;
+    color:#3d556e;
+    overflow-wrap:anywhere
+  }
 </style>
 </head>
-
 <body>
-<div id="drop" class="drop" role="button" tabindex="0">
-  <strong>📂 ลาก MP4 + JSON ทั้งหมดมาวางตรงนี้</strong>
+
+<div
+  id="drop"
+  class="drop"
+  role="button"
+  tabindex="0"
+  aria-label="เลือกไฟล์ MP4"
+>
+  <strong>
+    📂 ลาก MP4 ทั้งหมดมาวางตรงนี้
+  </strong>
+
   <div class="meta">
     หรือคลิกเพื่อเลือกไฟล์ทั้งหมดพร้อมกันครั้งเดียว
-    ระบบจะเริ่มอัปโหลดอัตโนมัติ
+    ระบบเริ่มอัปโหลดเอง
+    <br>
+    รองรับ MP4 สูงสุด 150 คลิปต่อรอบ
+    อัปโหลดทีละส่วน ไม่ส่งไฟล์ทั้งหมด
+    เข้า RAM เซิร์ฟเวอร์พร้อมกัน
   </div>
+
   <input
     id="pick"
     type="file"
     multiple
-    accept=".json,.mp4,.mov,.mkv,.avi,.webm"
+    accept=".mp4,.mov,.mkv,.avi,.webm"
     hidden
   >
 </div>
@@ -96,520 +109,684 @@ progress {
   <button id="start" disabled>
     เริ่มอัปโหลดอีกครั้ง
   </button>
-  <button id="cancel" class="cancel" disabled>
+
+  <button
+    id="cancel"
+    class="cancel"
+    disabled
+  >
     หยุดอัปโหลด
   </button>
 </div>
 
-<div id="files">ยังไม่ได้เลือกไฟล์</div>
-<progress id="bar" value="0" max="100"></progress>
-<div id="status">รอเลือกไฟล์</div>
+<div id="files">
+  ยังไม่ได้เลือกไฟล์
+</div>
+
+<progress
+  id="bar"
+  value="0"
+  max="100"
+></progress>
+
+<div id="status">
+  รอเลือกไฟล์
+</div>
+
 <div id="errors"></div>
 
 <script>
-(function () {
-  const MAX_VIDEOS = 150;
-  const MAX_JSON = 150;
-  const CHUNK = 1572864;
+(function(){
 
-  const EXT_VIDEO = new Set([
-    "mp4", "mov", "mkv", "avi", "webm"
+  const MAX_VIDEOS=150;
+  const CHUNK=1572864;
+
+  const EXT_VIDEO=new Set([
+    'mp4','mov','mkv','avi','webm'
   ]);
 
-  const el = id => document.getElementById(id);
+  const el=id=>document.getElementById(id);
 
-  let nonce = null;
-  let picked = [];
-  let queue = [];
-  let index = 0;
-  let current = null;
-  let pending = null;
-  let uploading = false;
-  let stopped = false;
+  let nonce=null;
+  let picked=[];
+  let queue=[];
+  let index=0;
+  let current=null;
+  let pending=null;
 
-  let sentBytes = 0;
-  let totalBytes = 0;
-  let successes = 0;
-  let failed = 0;
-  let seq = 0;
+  let uploading=false;
+  let stopped=false;
 
-  const errors = [];
+  let sentBytes=0;
+  let totalBytes=0;
+  let successes=0;
+  let failed=0;
 
-  function post(type, data) {
+  let seq=0;
+  let ready=false;
+  let config={};
+
+  const errors=[];
+
+  function post(type,data){
     window.parent.postMessage(
-      Object.assign({
-        isStreamlitMessage: true,
-        type: type
-      }, data),
-      "*"
+      Object.assign(
+        {
+          isStreamlitMessage:true,
+          type:type
+        },
+        data
+      ),
+      '*'
     );
   }
 
-  function resize() {
-    post("streamlit:setFrameHeight", {
-      height: document.body.scrollHeight + 8
-    });
+  function resize(){
+    post(
+      'streamlit:setFrameHeight',
+      {
+        height:document.body.scrollHeight+8
+      }
+    );
   }
 
-  function status(message) {
-    el("status").textContent = message;
+  function status(message){
+    el('status').textContent=message;
     resize();
   }
 
-  function err(message) {
+  function err(message){
     errors.push(message);
-    el("errors").textContent = errors.slice(-10).join("\n");
+
+    el('errors').textContent=
+      errors.slice(-10).join('\n');
+
     resize();
   }
 
-  function buttonStates() {
-    el("start").disabled = uploading || !picked.length;
-    el("cancel").disabled = !uploading;
+  function buttonStates(){
+    el('start').disabled=
+      uploading||!picked.length;
+
+    el('cancel').disabled=!uploading;
   }
 
-  function token() {
-    if (window.crypto && crypto.randomUUID) {
-      return crypto.randomUUID().replaceAll("-", "");
+  function token(){
+    if(
+      window.crypto
+      && crypto.randomUUID
+    ){
+      return crypto.randomUUID()
+        .replaceAll('-','');
     }
+
     return (
-      Date.now().toString(36) +
-      Math.random().toString(36).slice(2) +
-      "abcdefgh"
+      Date.now().toString(36)
+      + Math.random().toString(36).slice(2)
+      + 'abcdefgh'
     );
   }
 
-  function byteLabel(n) {
-    return (n / 1048576).toFixed(1) + " MB";
+  function byteLabel(n){
+    return (
+      (n/1048576).toFixed(1)
+      +' MB'
+    );
   }
 
-  function choose(files) {
-    if (uploading) {
-      err("กำลังอัปโหลดอยู่ กรุณารอก่อน");
+  function choose(files){
+
+    if(uploading){
+      err(
+        'กำลังอัปโหลดอยู่ '
+        +'กรุณารอหรือกดหยุดก่อน'
+      );
       return;
     }
 
-    const seen = new Set();
-    let videoCount = 0;
-    let jsonCount = 0;
-    let invalid = 0;
-    const accepted = [];
+    const seen=new Set();
 
-    for (const file of files) {
-      const name = file.name.normalize("NFC");
-      const ext = name.split(".").pop().toLowerCase();
-      const isVideo = EXT_VIDEO.has(ext);
-      const isJson = ext === "json";
+    let v=0;
+    const accepted=[];
+    let invalid=0;
 
-      if (!isVideo && !isJson) {
+    for(const f of files){
+
+      const name=f.name.normalize('NFC');
+      const ext=name.split('.')
+        .pop()
+        .toLowerCase();
+
+      const isVideo=EXT_VIDEO.has(ext);
+
+      if(!isVideo){
         invalid++;
         continue;
       }
 
-      const key = name.toLocaleLowerCase();
+      const key=name.toLocaleLowerCase();
 
-      if (seen.has(key)) {
-        err("ชื่อไฟล์ซ้ำ: " + name);
+      if(seen.has(key)){
+        err(
+          'ชื่อไฟล์ซ้ำในชุดที่เลือก: '
+          +name
+        );
         invalid++;
         continue;
       }
 
       seen.add(key);
 
-      if (
-        (isVideo && videoCount >= MAX_VIDEOS) ||
-        (isJson && jsonCount >= MAX_JSON)
-      ) {
-        err("เกิน 150 วิดีโอ หรือ 150 JSON");
+      if(v>=MAX_VIDEOS){
+        err(
+          'เกินจำนวนสูงสุด 150 วิดีโอ'
+        );
         invalid++;
         continue;
       }
 
-      if (
-        file.size <= 0 ||
-        (isVideo && file.size > 50 * 1048576) ||
-        (isJson && file.size > 150 * 1024)
-      ) {
-        err("ขนาดไฟล์ไม่รองรับ: " + name);
+      if(
+        f.size<=0
+        || f.size>50*1048576
+      ){
+        err(
+          'ขนาดไฟล์ไม่รองรับ: '
+          +name
+        );
         invalid++;
         continue;
       }
 
-      accepted.push(file);
-
-      if (isVideo) {
-        videoCount++;
-      } else {
-        jsonCount++;
-      }
+      accepted.push(f);
+      v++;
     }
 
-    // JSON first, then videos.
-    accepted.sort((a, b) => {
-      const isJsonA = a.name.toLowerCase().endsWith(".json");
-      const isJsonB = b.name.toLowerCase().endsWith(".json");
-      return Number(!isJsonA) - Number(!isJsonB);
-    });
+    picked=accepted;
 
-    picked = accepted;
+    el('files').textContent=
+      `เลือก ${accepted.length} ไฟล์ `+
+      `(${v} วิดีโอ) รวม `+
+      `${byteLabel(accepted.reduce(
+        (s,f)=>s+f.size,0
+      ))}`+
+      (invalid?` | ไม่รับ ${invalid} ไฟล์`:'');
 
-    const total = accepted.reduce(
-      (sum, file) => sum + file.size,
-      0
+    status(
+      'กำลังเตรียมอัปโหลดอัตโนมัติ...'
     );
-
-    el("files").textContent =
-      `เลือก ${accepted.length} ไฟล์ ` +
-      `(${videoCount} วิดีโอ, ${jsonCount} JSON) ` +
-      `รวม ${byteLabel(total)}` +
-      (invalid ? ` | ไม่รับ ${invalid} ไฟล์` : "");
 
     buttonStates();
 
-    if (picked.length) {
-      setTimeout(beginBatch, 0);
+    if(picked.length){
+      setTimeout(beginBatch,0);
     }
   }
 
-  const drop = el("drop");
+  el('pick').addEventListener(
+    'change',
+    e=>choose(
+      Array.from(e.target.files)
+    )
+  );
 
-  drop.addEventListener("click", () => {
-    if (!uploading) el("pick").click();
-  });
+  const drop=el('drop');
 
-  el("pick").addEventListener("change", event => {
-    choose(Array.from(event.target.files));
-  });
-
-  ["dragenter", "dragover"].forEach(name => {
-    drop.addEventListener(name, event => {
-      event.preventDefault();
-      drop.classList.add("over");
-    });
-  });
-
-  ["dragleave", "drop"].forEach(name => {
-    drop.addEventListener(name, event => {
-      event.preventDefault();
-      drop.classList.remove("over");
-    });
-  });
-
-  drop.addEventListener("drop", event => {
-    if (!uploading) {
-      choose(Array.from(event.dataTransfer.files));
+  drop.addEventListener(
+    'click',
+    ()=>{
+      if(!uploading){
+        el('pick').click();
+      }
     }
-  });
+  );
 
-  function updateProgress() {
-    const loaded = current ? current.offset : 0;
+  drop.addEventListener(
+    'keydown',
+    e=>{
+      if(
+        e.key==='Enter'
+        && !uploading
+      ){
+        el('pick').click();
+      }
+    }
+  );
 
-    const percent = totalBytes
-      ? Math.min(
-          100,
-          100 * (sentBytes + loaded) / totalBytes
-        )
-      : 100;
+  ['dragenter','dragover'].forEach(
+    name=>drop.addEventListener(
+      name,
+      e=>{
+        e.preventDefault();
+        drop.classList.add('over');
+      }
+    )
+  );
 
-    el("bar").value = percent;
+  ['dragleave','drop'].forEach(
+    name=>drop.addEventListener(
+      name,
+      e=>{
+        e.preventDefault();
+        drop.classList.remove('over');
+      }
+    )
+  );
 
-    const filename = current
-      ? current.file.name
-      : "—";
+  drop.addEventListener(
+    'drop',
+    e=>{
+      if(!uploading){
+        choose(
+          Array.from(
+            e.dataTransfer.files
+          )
+        );
+      }
+    }
+  );
+
+  function updateProgress(){
+
+    const currentLoaded=
+      current?current.offset:0;
+
+    const percent=totalBytes
+      ?Math.min(
+        100,
+        100*(sentBytes+currentLoaded)
+        /totalBytes
+      )
+      :100;
+
+    el('bar').value=percent;
+
+    const name=current
+      ?current.file.name
+      :'—';
 
     status(
-      `กำลังอัปโหลด ${index + 1}/${queue.length}: ${filename}\n` +
-      `${percent.toFixed(1)}% | สำเร็จ ${successes} | ` +
-      `มีปัญหา ${failed}\n` +
+      `กำลังอัปโหลด ${index+1}/`+
+      `${queue.length}: ${name}\n`+
+      `${percent.toFixed(1)}% | `+
+      `สำเร็จ ${successes} | `+
+      `มีปัญหา ${failed} | `+
       `โปรดเปิดหน้านี้ค้างไว้`
     );
   }
 
-  function send(payload) {
-    if (pending) return;
+  function send(payload){
 
-    pending = {
-      id: token() + "_" + (++seq),
-      payload: payload,
-      tries: 0,
-      timer: null
+    if(pending){
+      return;
+    }
+
+    const id=token()+'_'+(++seq);
+
+    pending={
+      id,
+      payload,
+      tries:0,
+      timer:null
     };
 
     actuallySend();
   }
 
-  function actuallySend() {
-    if (!pending) return;
+  function actuallySend(){
 
-    const tx = Object.assign(
+    if(!pending){
+      return;
+    }
+
+    const tx=Object.assign(
       {},
       pending.payload,
       {
-        id: pending.id,
-        attempt: pending.tries++
+        id:pending.id,
+        attempt:pending.tries++
       }
     );
 
-    post("streamlit:setComponentValue", {
-      value: tx,
-      dataType: "json"
-    });
+    post(
+      'streamlit:setComponentValue',
+      {
+        value:tx,
+        dataType:'json'
+      }
+    );
 
     clearTimeout(pending.timer);
 
-    pending.timer = setTimeout(() => {
-      if (!pending) return;
+    pending.timer=setTimeout(
+      ()=>{
+        if(pending){
 
-      if (pending.tries >= 4) {
-        failFile("เซิร์ฟเวอร์ไม่ตอบรับ");
-        return;
-      }
+          if(pending.tries>=4){
+            failFile(
+              'เซิร์ฟเวอร์ไม่ตอบรับหลังรอนาน '
+              +'กรุณาเชื่อมต่อใหม่'
+            );
+            return;
+          }
 
-      actuallySend();
-    }, 25000);
+          actuallySend();
+        }
+      },
+      25000
+    );
   }
 
-  function failFile(message) {
-    if (pending) {
-      clearTimeout(pending.timer);
-    }
+  function failFile(message){
 
-    pending = null;
+    clearTimeout(
+      pending&&pending.timer
+    );
+
+    pending=null;
 
     err(
-      (current ? current.file.name + ": " : "") +
-      message
+      (
+        current
+        ?current.file.name+': '
+        :''
+      )+message
     );
 
     failed++;
 
-    if (current) {
-      sentBytes += current.file.size;
+    if(current){
+      sentBytes+=current.file.size;
     }
 
     index++;
-    current = null;
+    current=null;
 
     nextFile();
   }
 
-  function finish() {
-    uploading = false;
-    current = null;
-    pending = null;
+  function finish(){
 
-    el("bar").value = 100;
+    uploading=false;
+    current=null;
+    pending=null;
+
+    el('bar').value=100;
 
     status(
-      `อัปโหลดจบแล้ว\n` +
-      `สำเร็จ ${successes} ไฟล์ | ` +
-      `มีปัญหา ${failed} ไฟล์\n` +
-      `ดูผลตรวจได้ที่ตารางด้านล่าง`
+      `เสร็จแล้ว: อัปโหลดสำเร็จ `+
+      `${successes} ไฟล์ | `+
+      `มีปัญหา ${failed} ไฟล์\n`+
+      `ตรวจผลที่ตารางด้านล่างได้`
     );
 
     buttonStates();
     resize();
   }
 
-  function nextFile() {
-    if (stopped || index >= queue.length) {
+  function nextFile(){
+
+    if(
+      stopped
+      ||index>=queue.length
+    ){
       finish();
       return;
     }
 
-    const file = queue[index];
+    const file=queue[index];
 
-    current = {
-      file: file,
-      id: token(),
-      offset: 0
+    current={
+      file,
+      id:token(),
+      offset:0,
+      stage:'start'
     };
 
     updateProgress();
 
     send({
-      type: "start",
-      file_id: current.id,
-      filename: file.name,
-      size: file.size
+      type:'start',
+      file_id:current.id,
+      filename:file.name,
+      size:file.size
     });
   }
 
-  function nextChunk() {
-    if (!current || pending) return;
+  function nextChunk(){
 
-    if (current.offset >= current.file.size) {
-      send({
-        type: "end",
-        file_id: current.id
-      });
+    if(
+      !current
+      ||pending
+    ){
       return;
     }
 
-    const position = current.offset;
-    const blob = current.file.slice(
+    if(
+      current.offset
+      >=current.file.size
+    ){
+      current.stage='end';
+
+      send({
+        type:'end',
+        file_id:current.id
+      });
+
+      return;
+    }
+
+    const position=current.offset;
+
+    const blob=current.file.slice(
       position,
-      position + CHUNK
+      position+CHUNK
     );
 
-    const reader = new FileReader();
+    const reader=new FileReader();
 
-    reader.onload = () => {
-      if (
-        !uploading ||
-        !current ||
-        pending ||
-        position !== current.offset
-      ) {
+    reader.onload=()=>{
+
+      if(
+        !uploading
+        ||!current
+        ||pending
+        ||position!==current.offset
+      ){
         return;
       }
 
-      const raw = String(reader.result);
-      const b64 = raw.slice(raw.indexOf(",") + 1);
+      const raw=String(
+        reader.result
+      );
+
+      const b64=raw.slice(
+        raw.indexOf(',')+1
+      );
+
+      current.stage='chunk';
 
       send({
-        type: "chunk",
-        file_id: current.id,
-        offset: position,
-        data: b64
+        type:'chunk',
+        file_id:current.id,
+        offset:position,
+        data:b64
       });
     };
 
-    reader.onerror = () => {
-      failFile("อ่านไฟล์ไม่สำเร็จ");
-    };
+    reader.onerror=()=>failFile(
+      'อ่านไฟล์ในคอมพิวเตอร์ไม่ได้'
+    );
 
     reader.readAsDataURL(blob);
   }
 
-  function onAck(ack) {
-    if (
-      !pending ||
-      !ack ||
-      ack.id !== pending.id
-    ) {
+  function onAck(ack){
+
+    if(
+      !pending
+      ||!ack
+      ||ack.id!==pending.id
+    ){
       return;
     }
 
-    const step = pending.payload.type;
+    const step=pending.payload.type;
 
     clearTimeout(pending.timer);
-    pending = null;
+    pending=null;
 
-    if (!ack.ok) {
+    if(!ack.ok){
       failFile(
-        ack.message || "เซิร์ฟเวอร์ไม่รับไฟล์"
+        ack.message
+        ||'เซิร์ฟเวอร์ไม่รับไฟล์'
       );
       return;
     }
 
-    if (stopped) {
+    if(stopped){
       finish();
       return;
     }
 
-    if (step === "start") {
+    if(step==='start'){
       nextChunk();
 
-    } else if (step === "chunk") {
-      current.offset = Number(
-        ack.received
-      ) || current.offset;
+    }else if(step==='chunk'){
+
+      current.offset=
+        Number(ack.received)
+        ||current.offset;
 
       updateProgress();
       nextChunk();
 
-    } else if (step === "end") {
+    }else if(step==='end'){
+
       successes++;
-      sentBytes += current.file.size;
+
+      sentBytes+=current.file.size;
+
       index++;
-      current = null;
+      current=null;
+
       nextFile();
     }
   }
 
-  function beginBatch() {
-    if (uploading || !picked.length) return;
+  function beginBatch(){
 
-    queue = picked;
-    index = 0;
-    successes = 0;
-    failed = 0;
-    sentBytes = 0;
+    if(
+      uploading
+      ||!picked.length
+    ){
+      return;
+    }
 
-    totalBytes = queue.reduce(
-      (sum, file) => sum + file.size,
+    queue=picked;
+
+    index=0;
+    successes=0;
+    failed=0;
+    sentBytes=0;
+
+    totalBytes=queue.reduce(
+      (sum,file)=>sum+file.size,
       0
     );
 
-    stopped = false;
-    uploading = true;
+    stopped=false;
+    uploading=true;
 
-    el("errors").textContent = "";
-    errors.length = 0;
+    el('errors').textContent='';
+    errors.length=0;
 
     buttonStates();
     nextFile();
   }
 
-  el("start").addEventListener(
-    "click",
+  el('start').addEventListener(
+    'click',
     beginBatch
   );
 
-  el("cancel").addEventListener(
-    "click",
-    () => {
-      stopped = true;
-      status("กำลังหยุดอัปโหลด...");
+  el('cancel').addEventListener(
+    'click',
+    ()=>{
+      stopped=true;
 
-      if (!pending) {
+      status(
+        'กำลังหยุด: '
+        +'รอข้อมูลชิ้นปัจจุบันตอบรับ'
+      );
+
+      if(!pending){
         finish();
       }
     }
   );
 
-  window.addEventListener("message", event => {
-    if (
-      !event.data ||
-      event.data.type !== "streamlit:render"
-    ) {
-      return;
+  window.addEventListener(
+    'message',
+    event=>{
+
+      if(
+        !event.data
+        ||event.data.type!==
+        'streamlit:render'
+      ){
+        return;
+      }
+
+      const args=event.data.args||{};
+
+      if(args.nonce!==nonce){
+
+        nonce=args.nonce;
+
+        stopped=true;
+        uploading=false;
+        pending=null;
+
+        picked=[];
+        queue=[];
+        current=null;
+        index=0;
+
+        el('bar').value=0;
+        el('pick').value='';
+
+        el('files').textContent=
+          'ยังไม่ได้เลือกไฟล์';
+
+        buttonStates();
+        status('รอเลือกไฟล์');
+      }
+
+      config=args;
+
+      if(args.ack){
+        onAck(args.ack);
+      }
+
+      if(!ready){
+        ready=true;
+        resize();
+      }
     }
+  );
 
-    const args = event.data.args || {};
-
-    if (args.nonce !== nonce) {
-      nonce = args.nonce;
-
-      stopped = true;
-      uploading = false;
-      pending = null;
-      picked = [];
-      queue = [];
-      current = null;
-      index = 0;
-
-      el("bar").value = 0;
-      el("pick").value = "";
-      el("files").textContent =
-        "ยังไม่ได้เลือกไฟล์";
-
-      buttonStates();
-      status("รอเลือกไฟล์");
+  post(
+    'streamlit:componentReady',
+    {
+      apiVersion:1
     }
+  );
 
-    if (args.ack) {
-      onAck(args.ack);
-    }
+  window.addEventListener(
+    'load',
+    resize
+  );
 
-    resize();
-  });
-
-  post("streamlit:componentReady", {
-    apiVersion: 1
-  });
-
-  window.addEventListener("load", resize);
 })();
 </script>
 </body>
