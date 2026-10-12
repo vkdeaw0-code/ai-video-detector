@@ -1,17 +1,7 @@
 
-"""V3.9 Hybrid Quality Engine.
-
-MP4 alone OR MP4 + optional product JSON.
-PASS / FAIL / REVIEW.
-
-Uses one Gemini request for clearly good/bad clips
-and a targeted second request for uncertain clips.
-"""
-
+"""V3.9.1 MP4-only video QC: evidence-first, fast single pass, selective audit."""
 from __future__ import annotations
-
 import base64
-import hashlib
 import json
 import math
 import re
@@ -19,20 +9,23 @@ import subprocess
 import tempfile
 import time
 import wave
-
 from array import array
 from pathlib import Path
 
 import requests
 from PIL import Image, ImageDraw, ImageOps
 
+ENGINE_VERSION = "3.9.1-mp4-only-20261012"
 
-ENGINE_VERSION = "v3.9-hybrid-quality-20261012-r1"
+MODELS = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.8-flash",
+)
 
-ALLOWED_MODELS = {
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-}
+DEFAULT_MODEL = MODELS[0]
+ALLOWED_MODELS = set(MODELS)
 
 FPS = {
     "Fast": 1,
@@ -41,9 +34,7 @@ FPS = {
 }
 
 FRAME_EDGE = 640
-MAX_SECONDS = 30
-RECHECK_MODE = "smart"
-CLEAN_SAMPLE_PERCENT = 5
+MAX_SECONDS = 35
 
 
 class AnalysisError(RuntimeError):
@@ -54,276 +45,129 @@ class QuotaError(AnalysisError):
     pass
 
 
-SCHEMA = r'''
-{
- "product_type_th":"ประเภทสินค้าจากภาพ",
- "video_type":"HANDS",
- "visible_product_th":"สิ่งที่เห็นจริงในคลิป",
- "spoken_product_th":"สินค้าที่พูดถึงในเสียง",
- "speech_summary_th":"สรุปคำพูดจริง",
- "scale":{
-  "result":"PASS",
-  "confidence":0.0,
-  "reference_fit":"consistent",
-  "observed_surface":"unknown",
-  "hand_anchor_th":"",
-  "environment_anchor_th":"",
-  "product_use_th":"",
-  "potential_miniature":false,
-  "mini_is_correct_product":false,
-  "extension_evidence_th":"",
-  "events":[
-   {
-    "time_sec":1.0,
-    "seen_th":"",
-    "conflict_th":""
-   }
-  ],
-  "reason_th":""
- },
- "speech":{
-  "result":"PASS",
-  "confidence":0.0,
-  "speech_present":true,
-  "wrong_words":[
-   {
-    "time_sec":1.0,
-    "heard_th":"",
-    "why_wrong_th":""
-   }
-  ],
-  "gibberish":false,
-  "gibberish_evidence_th":"",
-  "reason_th":""
- },
- "match":{
-  "result":"PASS",
-  "confidence":0.0,
-  "spoken_claim_th":"",
-  "video_fact_th":"",
-  "json_fact_th":"",
-  "reason_th":""
- },
- "visual":{
-  "result":"PASS",
-  "confidence":0.0,
-  "events":[
-   {
-    "time_sec":1.0,
-    "seen_th":"",
-    "wrong_th":""
-   }
-  ],
-  "reason_th":""
- },
- "mirror":{
-  "applicable":false,
-  "result":"PASS",
-  "confidence":0.0,
-  "reflection_expected":false,
-  "angle_uncertain":false,
-  "events":[
-   {
-    "type":"missing_hand_reflection",
-    "start_sec":1.0,
-    "end_sec":3.5,
-    "seen_th":"",
-    "geometry_th":"",
-    "sample_times_sec":[1.0,2.0,3.5]
-   }
-  ],
-  "reason_th":""
- },
- "risk_flags":[],
- "summary_th":""
-}
-'''
+def available_models(api_key: str) -> list[str]:
+    """ตรวจสอบโมเดลที่ API Key สามารถมองเห็นผ่าน Google models.list"""
+    if not api_key:
+        return []
 
+    names = set()
+    token = None
 
-FIRST_PROMPT = r'''
-คุณเป็นผู้ตรวจ QC วิดีโอโฆษณาสินค้า AI
-ตรวจภาพตามลำดับเวลาและฟังเสียงจริง
-
-เป้าหมาย:
-- คลิปดีจริงต้อง PASS
-- ผิดรุนแรงที่มีหลักฐานต้อง FAIL
-- ยังไม่แน่ใจเรื่องสำคัญต้อง REVIEW
-- ห้ามพยายามให้ FAIL ครบจำนวนที่กำหนด
-- ห้ามสร้างหลักฐานขึ้นเอง
-
-ขั้นแรก จำแนกประเภทสินค้าอย่างเฉพาะเจาะจง
-จากภาพ ไม่จำกัดหมวดหมู่ เช่น
-ลูกฟุตบอล แป้นบาส กระจก รองเท้าหรือเครื่องใช้ไฟฟ้า
-
-ถ้ามี JSON ให้ใช้เป็นข้อมูลสินค้าอ้างอิง
-ถ้าไม่มี JSON ให้ตรวจจากภาพและคำพูด
-อย่าลงโทษคลิปเพราะไม่มี JSON
-
-ด้านที่ 1: สเกลและการใช้งาน
-- เทียบขนาดกับมือ นิ้ว คน โต๊ะ พื้น ชั้นวาง
-- เทียบกับวัตถุในระนาบเดียวกัน
-- ตรวจว่าขนาดเปลี่ยนผิดธรรมชาติหรือไม่
-- ตรวจของจิ๋วที่นำเสนอเป็นสินค้าขนาดจริง
-- ตรวจว่าสินค้าใช้งานได้ตามที่โฆษณาหรือไม่
-- สินค้าอาจพับเก็บหรือปรับอยู่ระดับต่ำได้
-- สินค้าวางบนชั้นไม่ได้แปลว่าขนาดผิดทันที
-- หากมีข้ออ้างขนาดใน JSON ให้เทียบกับภาพ
-- ห้ามเดาขนาดเป็นเซนติเมตรจากภาพล้วน
-- หลักฐานไม่พอให้ REVIEW ไม่ใช่ FAIL
-
-ด้านที่ 2: เสียงภาษาไทย
-- ฟังคำพูดจริงทุกช่วง
-- ออกเสียงผิดอย่างชัดเจนตั้งแต่ 2 ตำแหน่งคำ
-  ให้ FAIL เมื่อระบุคำและเวลาได้
-- เสียงมั่วต่อเนื่องฟังไม่เข้าใจ ให้ FAIL
-- เพี้ยนเล็กน้อย 1 คำยัง PASS ได้
-- สำเนียง AI ชื่อแบรนด์ ศัพท์เทคนิค
-  ไม่ผิดโดยอัตโนมัติ
-- ห้ามสร้างคำผิดที่ไม่ได้ยินจริง
-
-ด้านที่ 3: ความสัมพันธ์ของคำพูดและสินค้า
-- เปรียบเทียบชนิดสินค้าที่พูดกับสิ่งที่เห็น
-- ตรวจจำนวน ขนาด คุณสมบัติ วิธีใช้
-- หากมี JSON ให้ตรวจเทียบกับข้อมูลสินค้า
-- พูดขายสินค้าอีกชนิดหนึ่งอย่างชัดเจนให้ FAIL
-- ไม่มีหลักฐานตัวเลข ห้ามเดาว่าผิด
-- ความขัดแย้งที่ยังพิสูจน์ไม่ได้ให้ REVIEW
-
-ด้านที่ 4: ความสมจริง
-- มือทะลุสินค้าผิดธรรมชาติ
-- นิ้วหายขณะสัมผัสสินค้า
-- สินค้าละลายหรือบิดเบี้ยวรุนแรง
-- สินค้าเปลี่ยนชนิดระหว่างคลิป
-- สินค้าหายโดยไม่มีเหตุสมควร
-- รูปทรงผิดจนใช้งานไม่ได้
-สิ่งเหล่านี้ให้ FAIL เมื่อเห็นหลักฐานชัด
-ข้อผิดพลาดเล็กน้อยที่ไม่กระทบสินค้า PASS ได้
-
-ด้านที่ 5: กระจกและเงาสะท้อน
-ถ้าสินค้าหลักเป็นกระจกเงาหรือผิวสะท้อน:
-- ตรวจมือที่ควรสะท้อนแต่เงาหายไป
-- เงามือเคลื่อนไหวไม่สัมพันธ์กับมือ
-- ภาพสะท้อนบิดเบี้ยวอย่างรุนแรง
-- มือทะลุหรือถูกกลืนเข้าไปในกระจก
-- ตรวจมุมกล้องและสิ่งบดบังประกอบ
-- การอ้างว่ามือหายเกิน 2 วินาที
-  ต้องมีหลักฐานจากหลายเฟรมตามเวลา
-- ถ้ามุมสะท้อนไม่แน่ชัดให้ REVIEW
-ถ้าไม่ใช่กระจกให้ mirror.applicable=false
-
-การตอบ:
-ใช้ PASS / FAIL / REVIEW แยกทุกด้าน
-confidence คือความมั่นใจของ AI
-ไม่ใช่หลักฐานยืนยันในตัวเอง
-
-ทุกเหตุการณ์ต้องอธิบายสิ่งที่เห็นจริงพร้อมเวลา
-ไม่มีเหตุการณ์ให้ events=[]
-ไม่มีคำผิดให้ wrong_words=[]
-
-reference_fit=consistent|contradicts|unverified
-observed_surface=floor|shelf|table|handheld|wall|unknown
-mirror event type:
-missing_hand_reflection
-severe_warp
-impossible_reflection
-unrelated_motion
-
-ตอบเป็น JSON object อย่างเดียวตามโครงสร้าง:
-''' + SCHEMA
-
-
-AUDIT_PROMPT = r'''
-คุณเป็นผู้ตรวจ QC อิสระรอบที่สอง
-ตรวจเฉพาะด้านที่ระบุท้ายคำสั่ง
-
-ห้ามอาศัยคำตัดสินของรอบแรก
-และห้ามสร้างเหตุการณ์ขึ้นมาเอง
-
-ตรวจชนิดสินค้า สัดส่วนกับมือ คน สภาพแวดล้อม
-และความเป็นไปได้ของการใช้งาน
-
-ถ้าเป็นสินค้าพับหรือปรับระดับได้
-ต้องระวังการตีความผิดสเกล
-
-ตรวจเสียงที่ได้ยินจริง
-ตรวจคำพูดสัมพันธ์กับภาพและ JSON เมื่อมี
-
-สำหรับกระจก:
-ตรวจเงามือ ภาพสะท้อน และมุมสะท้อน
-หากอ้างว่ามือหายเกิน 2 วินาที
-ต้องมีหลักฐานหลายช่วงเวลา
-
-ถ้ายืนยันผิดได้จริงให้ FAIL
-ถ้ายืนยันไม่ได้ให้ REVIEW
-หากไม่พบข้อผิดพลาดสำคัญให้ PASS
-
-ตอบ JSON object ตามโครงสร้างต่อไปนี้
-ด้านที่ไม่ได้ตรวจให้ PASS และ events=[]:
-''' + SCHEMA
-
-
-# ==========================================
-# HELPERS
-# ==========================================
-
-def _text(x, limit=450):
-    return str(x or "").strip()[:limit]
-
-
-def _num(x, fallback=0.0):
     try:
-        n = float(x)
-        return n if math.isfinite(n) else fallback
-    except (ValueError, TypeError):
-        return fallback
+        for _ in range(4):
+            params = {"pageSize": 100}
+
+            if token:
+                params["pageToken"] = token
+
+            response = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"x-goog-api-key": api_key},
+                params=params,
+                timeout=(8, 12),
+            )
+
+            if response.status_code >= 400:
+                raise AnalysisError(
+                    f"ตรวจสอบโมเดล HTTP {response.status_code}: "
+                    f"{response.text[:180]}"
+                )
+
+            result = response.json()
+
+            for item in result.get("models", []):
+                methods = item.get(
+                    "supportedGenerationMethods", []
+                )
+
+                name = str(
+                    item.get("name", "")
+                ).removeprefix("models/")
+
+                if (
+                    "generateContent" in methods
+                    and name in MODELS
+                ):
+                    names.add(name)
+
+            token = result.get("nextPageToken")
+
+            if not token:
+                break
+
+    except (
+        requests.RequestException,
+        ValueError,
+    ) as exc:
+        raise AnalysisError(
+            f"ตรวจสอบโมเดลกับ Google ไม่ได้: {exc}"
+        ) from exc
+
+    return [
+        m for m in MODELS
+        if m in names
+    ]
 
 
-def _boolean(x):
+def _text(value, n=300):
+    return str(value or "").strip()[:n]
+
+
+def _float(value, default=0.0):
+    try:
+        n = float(value)
+        return n if math.isfinite(n) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _truth(value):
     return (
-        x is True
+        value is True
         or (
-            isinstance(x, str)
-            and x.lower() == "true"
+            isinstance(value, str)
+            and value.lower() == "true"
         )
     )
 
 
-def _status(block):
-    status = _text(
-        block.get("result")
-        if isinstance(block, dict)
-        else None
+def _status(section):
+    s = _text(
+        section.get("status")
+        if isinstance(section, dict)
+        else ""
     ).upper()
 
     return (
-        status
-        if status in ("PASS", "FAIL", "REVIEW")
+        s if s in {"PASS", "FAIL", "REVIEW"}
         else "REVIEW"
     )
 
 
-def _evidence(x):
-    s = _text(x).lower()
+def _proof(value):
+    s = _text(value).lower()
 
     return (
-        len(s) >= 8
+        len(s) >= 10
         and not s.startswith((
             "ไม่มี",
             "ไม่พบ",
             "ไม่แน่ใจ",
-            "ยืนยันไม่ได้",
+            "ไม่ชัด",
+            "ไม่สามารถ",
             "ปกติ",
-            "none",
             "unknown",
-            "no evidence",
+            "none",
+            "not visible",
+            "uncertain",
         ))
     )
 
 
-def _run(cmd, timeout=110):
+def _run(args, timeout=85):
     try:
-        process = subprocess.run(
-            cmd,
+        proc = subprocess.run(
+            args,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -335,21 +179,17 @@ def _run(cmd, timeout=110):
         subprocess.TimeoutExpired,
     ) as exc:
         raise AnalysisError(
-            f"FFmpeg/FFprobe ทำงานไม่ได้: {exc}"
+            f"เปิด/แปลงวิดีโอด้วย FFmpeg ไม่ได้: {exc}"
         ) from exc
 
-    if process.returncode:
+    if proc.returncode:
         raise AnalysisError(
-            "อ่านวิดีโอไม่ได้: "
-            + (process.stderr or "")[-400:]
+            "FFmpeg: "
+            + (proc.stderr or "")[-450:]
         )
 
-    return process.stdout
+    return proc.stdout
 
-
-# ==========================================
-# VIDEO PREPARATION
-# ==========================================
 
 def _probe(path):
     raw = _run([
@@ -362,15 +202,14 @@ def _probe(path):
     ])
 
     try:
-        obj = json.loads(raw)
-
+        info = json.loads(raw)
         duration = float(
-            obj["format"]["duration"]
+            info["format"]["duration"]
         )
 
-        types = {
-            s.get("codec_type")
-            for s in obj.get("streams", [])
+        tracks = {
+            x.get("codec_type")
+            for x in info["streams"]
         }
 
     except (
@@ -379,7 +218,7 @@ def _probe(path):
         TypeError,
     ) as exc:
         raise AnalysisError(
-            "อ่านความยาววิดีโอไม่ได้"
+            "อ่านความยาวหรือสตรีมวิดีโอไม่ได้"
         ) from exc
 
     if (
@@ -387,15 +226,15 @@ def _probe(path):
         or not 0.5 <= duration <= MAX_SECONDS
     ):
         raise AnalysisError(
-            f"รองรับคลิป 0.5–{MAX_SECONDS} วินาที"
+            f"รองรับคลิปยาว 0.5–{MAX_SECONDS} วินาที"
         )
 
-    if "video" not in types:
+    if "video" not in tracks:
         raise AnalysisError(
-            "ไม่มีภาพวิดีโอ"
+            "ไม่พบภาพวิดีโอ"
         )
 
-    return duration, "audio" in types
+    return duration, "audio" in tracks
 
 
 def _extract(video, folder, fps):
@@ -404,7 +243,7 @@ def _extract(video, folder, fps):
         exist_ok=True,
     )
 
-    filt = (
+    vf = (
         f"fps={fps},"
         f"scale={FRAME_EDGE}:{FRAME_EDGE}:"
         "force_original_aspect_ratio=decrease:"
@@ -418,31 +257,33 @@ def _extract(video, folder, fps):
         "-nostdin", "-y",
         "-threads", "2",
         "-i", str(video),
-        "-vf", filt,
+        "-vf", vf,
         "-q:v", "5",
-        str(folder / "f_%03d.jpg"),
-    ], 140)
+        str(folder / "frame_%03d.jpg"),
+    ], 120)
 
     frames = sorted(
-        folder.glob("f_*.jpg")
+        folder.glob("frame_*.jpg")
     )
 
     if not frames:
         raise AnalysisError(
-            "ดึงภาพจากคลิปไม่ได้"
+            "ดึงภาพจากคลิปไม่สำเร็จ"
         )
 
     return frames
 
 
 def _sheets(frames, fps, folder):
-    result = []
+    output = []
 
-    for start in range(0, len(frames), 6):
+    for start in range(
+        0, len(frames), 6
+    ):
         canvas = Image.new(
             "RGB",
-            (930, 516),
-            (25, 29, 35),
+            (990, 560),
+            "#171c27",
         )
 
         draw = ImageDraw.Draw(canvas)
@@ -450,56 +291,55 @@ def _sheets(frames, fps, folder):
         for i, src in enumerate(
             frames[start:start + 6]
         ):
-            with Image.open(src) as im:
+            with Image.open(src) as image:
                 thumb = ImageOps.contain(
-                    im.convert("RGB"),
-                    (300, 226),
+                    image.convert("RGB"),
+                    (320, 240),
                 )
 
             x = (
-                (i % 3) * 310
-                + (310 - thumb.width) // 2
+                (i % 3) * 330
+                + (330 - thumb.width) // 2
             )
 
             y = (
-                (i // 3) * 258
-                + 24
-                + (226 - thumb.height) // 2
+                (i // 3) * 280
+                + 26
+                + (240 - thumb.height) // 2
             )
 
             canvas.paste(thumb, (x, y))
 
             draw.text(
                 (
-                    (i % 3) * 310 + 8,
-                    (i // 3) * 258 + 5,
+                    (i % 3) * 330 + 7,
+                    (i // 3) * 280 + 6,
                 ),
                 f"{(start + i) / fps:.1f}s",
                 fill="white",
             )
 
-        dst = folder / (
-            f"sheet_{len(result):02d}.jpg"
+        dest = folder / (
+            f"sheet_{len(output):02d}.jpg"
         )
 
         canvas.save(
-            dst,
-            "JPEG",
-            quality=75,
+            dest,
+            quality=76,
             optimize=True,
         )
 
         canvas.close()
-        result.append(dst)
+        output.append(dest)
 
-    return result
+    return output
 
 
 def _audio(video, folder, has_audio):
     if not has_audio:
         return None
 
-    dst = folder / "speech.wav"
+    dest = folder / "voice.wav"
 
     _run([
         "ffmpeg",
@@ -511,18 +351,18 @@ def _audio(video, folder, has_audio):
         "-ac", "1",
         "-ar", "16000",
         "-c:a", "pcm_s16le",
-        str(dst),
-    ], 75)
+        str(dest),
+    ], 70)
 
     with wave.open(
-        str(dst), "rb"
-    ) as w:
-        data = w.readframes(
-            w.getnframes()
+        str(dest), "rb"
+    ) as audio:
+        content = audio.readframes(
+            audio.getnframes()
         )
 
     samples = array("h")
-    samples.frombytes(data)
+    samples.frombytes(content)
 
     if not samples:
         return None
@@ -532,83 +372,247 @@ def _audio(video, folder, has_audio):
         / len(samples)
     ) / 32768
 
-    return (
-        dst
-        if rms >= 0.0008
-        else None
-    )
+    return dest if rms >= 0.0008 else None
 
 
-# ==========================================
-# GEMINI REQUEST
-# ==========================================
-
-def _inline(file, mime):
+def _inline(path, mime):
     return {
         "inline_data": {
             "mime_type": mime,
             "data": base64.b64encode(
-                Path(file).read_bytes()
+                Path(path).read_bytes()
             ).decode("ascii"),
         }
     }
 
 
+SCHEMA = r'''
+{
+ "product_type_th":"ประเภทสินค้า",
+ "product_seen_th":"สินค้าที่เห็น",
+ "product_spoken_th":"สินค้าที่พูดถึง",
+ "speech_summary_th":"คำพูดโดยสรุป",
+ "scale":{
+   "status":"PASS",
+   "confidence":0.0,
+   "anchor_th":"มือ/คน/สิ่งแวดล้อมที่ใช้เทียบ",
+   "mini_correct":false,
+   "events":[
+     {
+       "time_sec":1.0,
+       "seen_th":"สิ่งที่เห็น",
+       "problem_th":"เหตุผลว่าผิดจริงอย่างไร"
+     }
+   ],
+   "reason_th":""
+ },
+ "speech":{
+   "status":"PASS",
+   "confidence":0.0,
+   "has_speech":true,
+   "wrong_words":[
+     {
+       "time_sec":1.0,
+       "heard_th":"คำที่ได้ยิน",
+       "problem_th":"ผิดอย่างไร"
+     }
+   ],
+   "gibberish":false,
+   "gibberish_evidence_th":"",
+   "reason_th":""
+ },
+ "match":{
+   "status":"PASS",
+   "confidence":0.0,
+   "spoken_claim_th":"",
+   "visual_fact_th":"",
+   "reason_th":""
+ },
+ "visual":{
+   "status":"PASS",
+   "confidence":0.0,
+   "events":[
+     {
+       "time_sec":1.0,
+       "seen_th":"",
+       "problem_th":""
+     }
+   ],
+   "reason_th":""
+ },
+ "mirror":{
+   "applicable":false,
+   "status":"PASS",
+   "confidence":0.0,
+   "reflection_should_be_visible":false,
+   "angle_uncertain":false,
+   "events":[
+     {
+       "type":"missing_hand_reflection",
+       "start_sec":1.0,
+       "end_sec":3.2,
+       "observed_th":"",
+       "geometry_th":"",
+       "sample_times_sec":[1.0,2.0,3.2]
+     }
+   ],
+   "reason_th":""
+ },
+ "important_uncertainties":[],
+ "summary_th":"ภาพรวมสั้นๆ"
+}
+'''
+
+
+FIRST_PROMPT = r'''
+คุณเป็นผู้ตรวจ QC โฆษณาสินค้าที่สร้างด้วย AI
+วัตถุประสงค์คือกันคลิปผิดรุนแรง
+แต่ให้สินค้าปกติผ่านได้
+อย่าบังคับให้ FAIL ตามอัตราส่วนที่กำหนด
+ห้ามเดาหลักฐาน
+
+ให้สังเกตภาพทุกช่วงเวลาที่ให้และฟัง WAV จริง
+ไม่จำเป็นต้องมี JSON
+
+ก่อนตรวจ จำแนกชนิดสินค้าที่ขายจากวัตถุหลัก
+และคำพูดอย่างละเอียด
+
+ไม่จำกัดประเภท:
+กีฬา เฟอร์นิเจอร์ เครื่องครัว กระจก
+เสื้อผ้า รองเท้า เครื่องใช้ไฟฟ้า
+ของเล่น เครื่องมือ ความงาม อาหาร
+อุปกรณ์เด็ก สัตว์เลี้ยง ฯลฯ
+
+เลือกหลักการใช้งานเฉพาะประเภทสินค้านั้น
+อย่าตรวจสเกลของทุกสินค้าด้วยกฎเดียว
+
+1 สเกลและการใช้งาน:
+- เทียบกับนิ้ว มือ คนและวัตถุระนาบเดียวกัน
+- สังเกตสัดส่วน
+- ของจิ๋วหลอกเป็นสินค้าขนาดใช้งานจริง
+- สินค้าขยาย/หดผิดธรรมชาติ
+- ใช้งานไม่ได้ตามที่พูด
+- พิจารณาการพับ/หดเสา มุมกล้อง
+- สินค้า MINI ที่เป็นของจริง
+- อย่าเดาขนาดเป็น cm จากภาพ
+- ถ้าเสียงบอกขนาดให้ตรวจความสมเหตุสมผล
+- ตัวเลขที่ตรวจไม่ได้ต้อง REVIEW
+
+2 เสียง:
+- ฟังภาษาไทยและคำพูดทุกช่วง
+- ผิดเสียงจริง >=2 ตำแหน่งคำให้ FAIL
+  เมื่อระบุคำและเวลาได้
+- พูดมั่วต่อเนื่องจนฟังไม่ได้ FAIL
+- คำผิดเล็กน้อย 1 คำ สำเนียง
+  หรือชื่อแบรนด์ ไม่ FAIL
+- ห้ามแต่งคำผิด
+- แยกคำผิดจริงจากสำเนียง
+
+3 ความสัมพันธ์เสียงกับภาพ:
+- พูดขายสินค้าอื่น
+- บอกสี จำนวน การใช้ ลักษณะ
+  ซึ่งขัดกับสิ่งที่เห็นอย่างชัด ให้ FAIL
+- หากยืนยันด้วยภาพไม่ได้ให้ REVIEW
+- ไม่ถือว่าไม่มี JSON เป็นข้อผิดพลาด
+
+4 ภาพ/มือ/สินค้าหลัก:
+- นิ้วผิดรุนแรง
+- มือทะลุสินค้า
+- มือหายขณะจับ
+- สินค้าเปลี่ยนชนิด
+- สินค้าละลาย
+- บิดจนผิดหน้าที่
+- ใช้งานผิดฟิสิกส์รุนแรง
+สิ่งเหล่านี้ให้ FAIL เมื่อเห็นหลักฐานชัด
+
+AI artifact เล็กน้อยที่ไม่กระทบสินค้าให้ผ่าน
+
+5 กระจกเงาที่เป็นสินค้าหลัก:
+- ดูว่ามือหรือวัตถุควรสะท้อน
+  ตามมุมเรขาคณิตหรือไม่
+- ถ้าหายเกิน 2 วินาที
+  ต้องมีตัวอย่างภาพหลายช่วงเวลาที่พิสูจน์จริง
+- ไม่ใช่เดาจากเฟรมเดียว
+- ภาพสะท้อนบิดผิดธรรมชาติรุนแรงก็ผิด
+- ถ้ามุมกล้องไม่แน่ใจ REVIEW
+- สินค้าแวววาวไม่ใช่กระจกเงาโดยอัตโนมัติ
+
+ตัดสินแต่ละด้าน status=PASS/FAIL/REVIEW
+confidence=ความมั่นใจของโมเดล
+ไม่ใช่หลักฐานด้วยตัวเอง
+
+ระบุ time_sec และข้อสังเกตจริง
+หาก FAIL หรือ REVIEW
+
+ไม่มีเหตุการณ์ให้ events=[]
+ไม่มีคำผิดให้ wrong_words=[]
+
+อย่าใส่ค่าตัวอย่างใน JSON จริง
+ต้องตอบ JSON object เท่านั้น ตาม schema:
+''' + SCHEMA
+
+
+SECOND_PROMPT = r'''
+คุณเป็นผู้ตรวจคุณภาพวิดีโออิสระรอบยืนยัน
+ตรวจเพียงหัวข้อที่ระบุ
+
+ห้ามอาศัยผลรอบแรก
+ไม่สร้างคำผิดหรือหลักฐานที่มองไม่เห็นเอง
+
+การผิดสเกลต้องมีมือ/คน/สภาพแวดล้อม
+และข้อขัดแย้งจริง
+
+คำพูดต้องเทียบสินค้าที่เห็นและการใช้จริง
+เสียงผิด >=2 คำต้องได้ยินและมีเวลา
+
+สินค้ากระจกต้องพิจารณามุมสะท้อน
+และหลายเฟรมก่อนสรุปว่ามือหาย >2s
+
+หากไม่ยืนยันได้ให้ REVIEW
+คลิปที่ไม่มีข้อผิดพลาดสำคัญให้ PASS
+
+ตอบ JSON ตาม schema เดิมทุกหัวข้อ
+หัวข้อที่ไม่ได้ตรวจให้ PASS/[]:
+''' + SCHEMA
+
+
 def _parts(
     prompt,
-    reference,
     duration,
     sheets,
-    extra,
+    details,
     wav,
 ):
-    if reference:
-        context = (
-            "ผู้ขายแนบข้อมูลสินค้า JSON "
-            "ให้ใช้เปรียบเทียบความถูกต้อง: "
-            + _text(reference, 1250)
-        )
-
-    else:
-        context = (
-            "ไม่มี JSON: ให้จำแนกประเภทสินค้า "
-            "และตรวจจากภาพและเสียงเอง "
-            "อย่าเดาตัวเลข/รุ่นสินค้า "
-            "หรือให้ REVIEW เพียงเพราะไม่มี JSON"
-        )
-
     parts = [{
         "text": (
             f"{prompt}\n"
-            f"ความยาวคลิป {duration:.2f}s\n"
-            f"{context}"
+            f"ความยาววิดีโอ {duration:.2f} วินาที"
         )
     }]
 
-    for file in sheets:
-        parts.extend([
-            {
-                "text": "ภาพเรียงตามเวลาจากต้นไปท้าย"
-            },
-            _inline(file, "image/jpeg"),
-        ])
-
-    for t, file in extra:
+    for path in sheets:
         parts.extend([
             {
                 "text": (
-                    f"รายละเอียดเฟรม {t:.1f}s"
+                    "ภาพตามลำดับเวลา "
+                    "มี timestamp บนแต่ละเฟรม"
                 )
             },
-            _inline(file, "image/jpeg"),
+            _inline(path, "image/jpeg"),
+        ])
+
+    for sec, path in details:
+        parts.extend([
+            {
+                "text": f"ภาพขยาย {sec:.1f}s"
+            },
+            _inline(path, "image/jpeg"),
         ])
 
     if wav is not None:
         parts.extend([
             {
-                "text": (
-                    "เสียงพูดและเสียงประกอบจริงทั้งคลิป"
-                )
+                "text": "เสียงจริงทั้งคลิป ฟังทุกคำ"
             },
             _inline(wav, "audio/wav"),
         ])
@@ -616,369 +620,351 @@ def _parts(
     else:
         parts.append({
             "text": (
-                "ไม่มีเสียงที่ได้ยินชัด "
-                "ห้ามสร้างคำผิดขึ้นเอง"
+                "คลิปไม่มีเสียงที่ตรวจได้ "
+                "ห้ามแต่งคำพูดหรือบังคับให้ผิดเสียง"
             )
         })
 
     return parts
 
 
-def _api(key, model, parts, max_tokens):
-    if not key:
+def _api(
+    api_key,
+    model,
+    parts,
+    max_tokens=3000,
+):
+    model = (
+        model if model in MODELS
+        else DEFAULT_MODEL
+    )
+
+    if not api_key:
         raise AnalysisError(
             "ไม่พบ GEMINI_API_KEY"
         )
 
-    if model not in ALLOWED_MODELS:
-        raise AnalysisError(
-            f"โมเดล {model} ไม่อยู่ในรายการที่รองรับ"
+    models_to_try = [model]
+
+    for selected in models_to_try:
+        url = (
+            "https://generativelanguage.googleapis.com"
+            f"/v1beta/models/{selected}:generateContent"
         )
 
-    endpoint = (
-        "https://generativelanguage.googleapis.com"
-        "/v1beta/models/"
-        + model
-        + ":generateContent"
-    )
+        request = {
+            "contents": [{
+                "role": "user",
+                "parts": parts,
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+                "maxOutputTokens": max_tokens,
+            },
+        }
 
-    payload = {
-        "contents": [{
-            "role": "user",
-            "parts": parts,
-        }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json",
-            "maxOutputTokens": max_tokens,
-        },
-    }
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": api_key,
+                    },
+                    json=request,
+                    timeout=(12, 105),
+                )
 
-    for retry in range(2):
-        try:
-            resp = requests.post(
-                endpoint,
-                headers={
-                    "x-goog-api-key": key,
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=(12, 100),
-            )
+            except requests.RequestException as exc:
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
 
-        except requests.RequestException as exc:
-            if retry == 0:
+                raise AnalysisError(
+                    f"เชื่อมต่อ Gemini ไม่ได้: {exc}"
+                ) from exc
+
+            if response.status_code == 429:
+                raise QuotaError(
+                    "Gemini API ถึงโควตา 429; "
+                    "รอแล้วจึงกดตรวจใหม่"
+                )
+
+            if (
+                response.status_code
+                in (500, 502, 503, 504)
+                and attempt == 0
+            ):
                 time.sleep(1)
                 continue
 
-            raise AnalysisError(
-                f"ติดต่อ Gemini ไม่สำเร็จ: {exc}"
-            ) from exc
+            if response.status_code >= 400:
+                try:
+                    message = response.json().get(
+                        "error", {}
+                    ).get(
+                        "message",
+                        response.text[:220],
+                    )
 
-        if resp.status_code == 429:
-            raise QuotaError(
-                "Gemini API ถึงโควตา (429) "
-                "กรุณารอแล้วเริ่มคิวต่อ"
-            )
+                except ValueError:
+                    message = response.text[:220]
 
-        if (
-            resp.status_code
-            in (500, 502, 503, 504)
-            and retry == 0
-        ):
-            time.sleep(1)
-            continue
+                # Model 404:
+                # Try another model visible to this key.
+                if (
+                    response.status_code == 404
+                    and selected == model
+                ):
+                    try:
+                        for replacement in available_models(api_key):
+                            if replacement not in models_to_try:
+                                models_to_try.append(
+                                    replacement
+                                )
 
-        if resp.status_code >= 400:
+                    except AnalysisError:
+                        pass
+
+                    if len(models_to_try) > 1:
+                        break
+
+                raise AnalysisError(
+                    f"Gemini HTTP {response.status_code} "
+                    f"({selected}): {message[:320]}"
+                )
+
             try:
-                error = resp.json().get(
-                    "error", {}
-                ).get("message", "")
+                candidate = response.json()[
+                    "candidates"
+                ][0]
 
-            except ValueError:
-                error = resp.text
+                raw = "".join(
+                    p.get("text", "")
+                    for p in candidate[
+                        "content"
+                    ]["parts"]
+                ).strip()
 
-            raise AnalysisError(
-                f"Gemini HTTP {resp.status_code}: "
-                f"{_text(error, 350)}"
-            )
-
-        try:
-            arr = resp.json()[
-                "candidates"
-            ][0]["content"]["parts"]
-
-            raw = "".join(
-                x.get("text", "")
-                for x in arr
-            ).strip()
-
-            raw = re.sub(
-                r"^```(?:json)?\s*|\s*```$",
-                "",
-                raw,
-            )
-
-            result = json.loads(raw)
-
-            required = (
-                "scale",
-                "speech",
-                "match",
-                "visual",
-                "mirror",
-            )
-
-            if (
-                not isinstance(result, dict)
-                or any(
-                    not isinstance(result.get(k), dict)
-                    for k in required
-                )
-            ):
-                raise ValueError(
-                    "Gemini ส่ง JSON ตรวจไม่ครบ"
+                raw = re.sub(
+                    r"^```(?:json)?\s*|\s*```$",
+                    "",
+                    raw,
                 )
 
-            return result
+                parsed = json.loads(raw)
 
-        except (
-            KeyError,
-            IndexError,
-            TypeError,
-            ValueError,
-        ) as exc:
-            raise AnalysisError(
-                f"คำตอบ Gemini JSON ไม่สมบูรณ์: {exc}"
-            ) from exc
+                required = (
+                    "scale",
+                    "speech",
+                    "match",
+                    "visual",
+                    "mirror",
+                )
+
+                if (
+                    not isinstance(parsed, dict)
+                    or not all(
+                        isinstance(parsed.get(k), dict)
+                        for k in required
+                    )
+                ):
+                    raise ValueError(
+                        "คำตอบขาดหัวข้อ QC บางส่วน"
+                    )
+
+                return parsed
+
+            except (
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise AnalysisError(
+                    f"Gemini ส่ง JSON ไม่สมบูรณ์: {exc}"
+                ) from exc
 
     raise AnalysisError(
-        "Gemini ไม่ตอบกลับ"
+        "ไม่สามารถตรวจผ่าน Gemini ได้"
     )
 
 
-# ==========================================
-# VALIDATE EVIDENCE
-# ==========================================
+def _events(section, duration):
+    raw = section.get("events", [])
 
-def _events(block, duration, kind="scale"):
-    if (
-        not isinstance(block, dict)
-        or not isinstance(
-            block.get("events"),
-            list,
-        )
-    ):
+    if not isinstance(raw, list):
         return []
 
-    found = []
+    valid = []
 
-    for item in block["events"][:12]:
-        if not isinstance(item, dict):
+    for e in raw[:12]:
+        if not isinstance(e, dict):
             continue
 
-        t = _num(
-            item.get("time_sec"), -1
+        t = _float(
+            e.get("time_sec"), -1
         )
 
         seen = _text(
-            item.get("seen_th")
+            e.get("seen_th"), 220
         )
 
-        why = _text(
-            item.get(
-                "conflict_th"
-                if kind == "scale"
-                else "wrong_th"
-            )
+        wrong = _text(
+            e.get("problem_th"), 250
         )
 
         if (
             0 <= t <= duration
-            and _evidence(seen)
-            and _evidence(why)
+            and _proof(seen)
+            and _proof(wrong)
         ):
-            found.append(
-                (t, seen, why)
-            )
+            valid.append((
+                t, seen, wrong
+            ))
 
-    return found
+    return valid
 
 
-def _words(speech, duration):
-    events = speech.get(
+def _words(section, duration):
+    raw = section.get(
         "wrong_words", []
     )
 
-    if not isinstance(events, list):
+    if not isinstance(raw, list):
         return []
 
     found = []
 
-    for item in events[:16]:
+    for item in raw[:15]:
         if not isinstance(item, dict):
             continue
 
-        t = _num(
+        t = _float(
             item.get("time_sec"), -1
         )
 
         heard = _text(
-            item.get("heard_th")
+            item.get("heard_th"), 70
         )
 
         why = _text(
-            item.get("why_wrong_th")
+            item.get("problem_th"), 190
         )
 
         if (
             0 <= t <= duration
             and heard
-            and _evidence(why)
+            and _proof(why)
             and all(
                 abs(t - x[0]) > 0.18
                 for x in found
             )
         ):
-            found.append(
-                (t, heard, why)
-            )
+            found.append((
+                t, heard, why
+            ))
 
     return found
 
 
-def _mirrors(mirror, duration):
-    events = mirror.get(
+def _mirror_events(section, duration):
+    raw = section.get(
         "events", []
     )
 
-    if not isinstance(events, list):
+    if not isinstance(raw, list):
         return []
 
-    items = []
+    found = []
 
-    valid_kinds = {
+    kinds = {
         "missing_hand_reflection",
         "severe_warp",
         "impossible_reflection",
         "unrelated_motion",
     }
 
-    for item in events[:10]:
-        if not isinstance(item, dict):
+    for e in raw[:10]:
+        if (
+            not isinstance(e, dict)
+            or e.get("type") not in kinds
+        ):
             continue
 
-        start = _num(
-            item.get("start_sec"), -1
+        start = _float(
+            e.get("start_sec"), -1
         )
 
-        end = _num(
-            item.get("end_sec"), -1
+        end = _float(
+            e.get("end_sec"), -1
         )
 
-        times = item.get(
+        seen = _text(
+            e.get("observed_th"), 260
+        )
+
+        geo = _text(
+            e.get("geometry_th"), 260
+        )
+
+        stamps = e.get(
             "sample_times_sec", []
         )
 
-        if not isinstance(times, list):
-            times = []
+        if not isinstance(stamps, list):
+            stamps = []
 
-        samples = sorted({
-            round(_num(t, -1), 2)
-            for t in times
+        valid_stamps = sorted({
+            round(_float(t, -1), 1)
+            for t in stamps
             if (
                 start - 0.5
-                <= _num(t, -1)
+                <= _float(t, -1)
                 <= end + 0.5
             )
         })
 
         if (
-            item.get("type") in valid_kinds
-            and 0 <= start < end <= duration
-            and _evidence(
-                item.get("seen_th")
-            )
-            and _evidence(
-                item.get("geometry_th")
-            )
+            0 <= start < end <= duration
+            and _proof(seen)
+            and _proof(geo)
         ):
-            multiple = (
-                len(samples) >= 4
-                and samples[-1] - samples[0] >= 2.0
-            )
+            found.append({
+                "kind": e["type"],
+                "time": start,
+                "duration": end - start,
+                "proof": seen + "; " + geo,
+                "multiple": (
+                    len(valid_stamps) >= 3
+                    and valid_stamps[-1] - valid_stamps[0] >= 1.8
+                ),
+            })
 
-            items.append((
-                start,
-                end,
-                multiple,
-                _text(item.get("seen_th")),
-                _text(item.get("geometry_th")),
-                item.get("type"),
-            ))
-
-    return items
+    return found
 
 
-# ==========================================
-# PRODUCT RISK
-# ==========================================
-
-def _dimension_claim(reference):
-    if not reference:
-        return False
-
-    matches = re.finditer(
-        r"(?<!\d)(\d{1,4}(?:[.,]\d+)?)\s*"
-        r"(ซม\.?|เซนติเมตร|cm\b|เมตร|\bm\b|"
-        r"นิ้ว|inch(?:es)?\b)",
-        reference,
-        re.I,
+def _is_mirror(data):
+    label = _text(
+        data.get("product_type_th"),
+        120,
     )
 
-    for item in matches:
-        number = _num(
-            item.group(1).replace(",", ".")
+    return (
+        bool(re.search(
+            r"กระจกเงา|กระจกส่อง|กระจกแต่งหน้า|mirror",
+            label,
+            re.I,
+        ))
+        or _truth(
+            data["mirror"].get("applicable")
         )
+    )
 
-        unit = item.group(2).lower()
-
-        if unit in ("เมตร", "m"):
-            cm = number * 100
-
-        elif unit in (
-            "นิ้ว",
-            "inch",
-            "inches",
-        ):
-            cm = number * 2.54
-
-        else:
-            cm = number
-
-        if 75 <= cm <= 1000:
-            return True
-
-    return False
-
-
-def _mirror_claim(reference):
-    return bool(re.search(
-        r"กระจกเงา|กระจกแต่งหน้า|กระจกส่อง|"
-        r"กระจกติดผนัง|กระจกเต็มตัว|\bmirror\b",
-        reference or "",
-        re.I,
-    ))
-
-
-# ==========================================
-# DECISION RULES
-# ==========================================
 
 def _judge(
     data,
     duration,
-    reference,
     scope=None,
 ):
     scope = set(
@@ -991,95 +977,65 @@ def _judge(
         )
     )
 
-    fails = []
-    needs = []
+    fail = []
+    review = []
 
-    sc = data["scale"]
-    sp = data["speech"]
-    ma = data["match"]
-    vi = data["visual"]
-    mi = data["mirror"]
+    sc, sp, ma, vi, mi = (
+        data[k]
+        for k in (
+            "scale",
+            "speech",
+            "match",
+            "visual",
+            "mirror",
+        )
+    )
 
     # SCALE
     if "scale" in scope:
-        evidence = _events(
+        events = _events(
             sc, duration
         )
 
-        fit = _text(
-            sc.get("reference_fit")
-        ).lower()
-
-        confident = (
-            _num(
-                sc.get("confidence")
-            ) >= 0.75
-        )
-
-        anchor = (
-            _evidence(
-                sc.get("hand_anchor_th")
-            )
-            or _evidence(
-                sc.get(
-                    "environment_anchor_th"
-                )
-            )
-        )
-
-        mini_ok = _boolean(
-            sc.get("mini_is_correct_product")
+        anchor = _proof(
+            sc.get("anchor_th")
         )
 
         if (
-            (
-                _status(sc) == "FAIL"
-                or fit == "contradicts"
+            _status(sc) == "FAIL"
+            and _float(
+                sc.get("confidence")
+            ) >= 0.77
+            and events
+            and (
+                anchor
+                or len(events) >= 2
             )
-            and confident
-            and evidence
-            and (anchor or len(evidence) >= 2)
-            and not mini_ok
+            and not _truth(
+                sc.get("mini_correct")
+            )
         ):
-            sec, seen, why = evidence[0]
+            t, seen, reason = events[0]
 
-            fails.append((
+            fail.append((
                 "scale",
-                sec,
-                f"สเกลผิด: {seen}; {why}",
+                t,
+                (
+                    f"สเกล/การใช้งานผิด: "
+                    f"{seen}; {reason}"
+                ),
             ))
 
         elif (
             _status(sc) != "PASS"
-            or fit == "contradicts"
             or (
-                _boolean(
-                    sc.get("potential_miniature")
-                )
-                and not mini_ok
-            )
-            or (
-                _dimension_claim(reference)
-                and _text(
-                    sc.get("observed_surface")
-                ).lower() in (
-                    "table",
-                    "shelf",
-                )
-                and not mini_ok
-                and not _evidence(
-                    sc.get(
-                        "extension_evidence_th"
-                    )
-                )
-                and not _evidence(
-                    sc.get(
-                        "environment_anchor_th"
-                    )
+                events
+                and not _truth(
+                    sc.get("mini_correct")
                 )
             )
         ):
-            needs.append("scale")
+            review.append("scale")
 
     # SPEECH
     if "speech" in scope:
@@ -1089,49 +1045,45 @@ def _judge(
 
         if (
             _status(sp) == "FAIL"
-            and _num(
+            and _float(
                 sp.get("confidence")
             ) >= 0.75
             and len(words) >= 2
         ):
-            sec = words[0][0]
-
-            explanation = "; ".join(
+            fail.append((
+                "speech",
+                words[0][0],
                 (
-                    f"{t:.1f}s '{word}' ({why})"
-                )
-                for t, word, why
-                in words[:3]
-            )
-
-            fails.append((
-                "audio",
-                sec,
-                "เสียงเพี้ยน >=2 คำ: "
-                + explanation,
+                    "เสียงออกผิด >=2 ตำแหน่ง: "
+                    + "; ".join(
+                        f"{t:.1f}s {w} ({why})"
+                        for t, w, why
+                        in words[:3]
+                    )
+                ),
             ))
 
         elif (
             _status(sp) == "FAIL"
-            and _num(
+            and _float(
                 sp.get("confidence")
             ) >= 0.80
-            and _boolean(
+            and _truth(
                 sp.get("gibberish")
             )
-            and _evidence(
-                sp.get(
-                    "gibberish_evidence_th"
-                )
+            and _proof(
+                sp.get("gibberish_evidence_th")
             )
         ):
-            fails.append((
-                "audio",
+            fail.append((
+                "speech",
                 0,
-                "เสียงมั่วต่อเนื่อง: "
-                + _text(
-                    sp.get(
-                        "gibberish_evidence_th"
+                (
+                    "เสียงมั่วต่อเนื่อง: "
+                    + _text(
+                        sp.get(
+                            "gibberish_evidence_th"
+                        )
                     )
                 ),
             ))
@@ -1140,112 +1092,92 @@ def _judge(
             _status(sp) != "PASS"
             or len(words) >= 2
         ):
-            needs.append("speech")
+            review.append("speech")
 
-    # SPEECH / PRODUCT MATCH
+    # SPEECH / IMAGE MATCH
     if "match" in scope:
         if (
             _status(ma) == "FAIL"
-            and _num(
+            and _float(
                 ma.get("confidence")
-            ) >= 0.78
-            and _evidence(
+            ) >= 0.77
+            and _proof(
                 ma.get("spoken_claim_th")
             )
-            and (
-                _evidence(
-                    ma.get("video_fact_th")
-                )
-                or (
-                    reference
-                    and _evidence(
-                        ma.get("json_fact_th")
-                    )
-                )
+            and _proof(
+                ma.get("visual_fact_th")
             )
         ):
-            fails.append((
+            fail.append((
                 "match",
                 0,
-                "คำพูดไม่ตรงภาพ/สินค้า: "
-                + _text(
-                    ma.get("reason_th")
-                    or ma.get("spoken_claim_th")
+                (
+                    "คำพูดกับภาพไม่ตรง: "
+                    + _text(
+                        ma.get("reason_th")
+                        or ma.get("spoken_claim_th")
+                    )
                 ),
             ))
 
         elif _status(ma) != "PASS":
-            needs.append("match")
+            review.append("match")
 
-    # VISUAL / HAND
+    # VISUAL
     if "visual" in scope:
         events = _events(
-            vi,
-            duration,
-            "visual",
+            vi, duration
         )
 
         if (
             _status(vi) == "FAIL"
-            and _num(
+            and _float(
                 vi.get("confidence")
             ) >= 0.78
             and events
         ):
-            sec, seen, why = events[0]
+            t, seen, reason = events[0]
 
-            fails.append((
+            fail.append((
                 "visual",
-                sec,
-                f"ภาพผิดธรรมชาติ: {seen}; {why}",
+                t,
+                (
+                    "สินค้า/มือผิดธรรมชาติรุนแรง: "
+                    f"{seen}; {reason}"
+                ),
             ))
 
-        elif _status(vi) != "PASS":
-            needs.append("visual")
+        elif (
+            _status(vi) != "PASS"
+            or events
+        ):
+            review.append("visual")
 
     # MIRROR
-    inferred_mirror = bool(re.search(
-        r"กระจกเงา|กระจกส่อง|กระจกแต่งหน้า|\bmirror\b",
-        _text(
-            data.get("product_type_th"),
-            180,
-        ),
-        re.I,
-    ))
-
-    mirror_applicable = (
-        _boolean(
-            mi.get("applicable")
-        )
-        or _mirror_claim(reference)
-        or inferred_mirror
-    )
-
     if (
         "mirror" in scope
-        and mirror_applicable
+        and _is_mirror(data)
     ):
-        events = _mirrors(
+        events = _mirror_events(
             mi, duration
         )
 
         confirmed = [
-            item
-            for item in events
+            e for e in events
             if (
-                item[2]
-                and not _boolean(
+                e["multiple"]
+                and not _truth(
                     mi.get("angle_uncertain")
                 )
                 and (
-                    item[5] != "missing_hand_reflection"
+                    e["kind"] != "missing_hand_reflection"
                     or (
-                        _boolean(
+                        e["duration"] > 2
+                        and _truth(
                             mi.get(
-                                "reflection_expected"
+                                "reflection_should_be_visible"
                             )
                         )
-                        and item[1] - item[0] > 2.0
                     )
                 )
             )
@@ -1253,85 +1185,47 @@ def _judge(
 
         if (
             _status(mi) == "FAIL"
-            and _num(
+            and _float(
                 mi.get("confidence")
             ) >= 0.82
             and confirmed
         ):
-            item = confirmed[0]
+            e = confirmed[0]
 
-            fails.append((
+            fail.append((
                 "mirror",
-                item[0],
+                e["time"],
                 (
-                    "เงาสะท้อนผิดธรรมชาติ: "
-                    f"{item[3]}; {item[4]}"
+                    "กระจก/เงาสะท้อนผิด: "
+                    + e["proof"]
                 ),
             ))
 
         elif (
             _status(mi) != "PASS"
             or events
-            or (
-                inferred_mirror
-                and not _boolean(
-                    mi.get("applicable")
-                )
-            )
         ):
-            needs.append("mirror")
+            review.append("mirror")
 
-    return (
-        fails,
-        list(dict.fromkeys(needs)),
+    # IMPORTANT UNCERTAINTY
+    uncertainties = data.get(
+        "important_uncertainties", []
     )
 
-
-# ==========================================
-# SMART RECHECK
-# ==========================================
-
-def _audit_focus(needs, path):
-    if RECHECK_MODE == "strict":
-        return {
-            "scale",
-            "speech",
-            "match",
-            "visual",
-            "mirror",
-        }
-
-    if needs:
-        return set(needs)
-
-    if RECHECK_MODE == "smart":
-        with open(path, "rb") as file:
-            digest = hashlib.sha256(
-                file.read(131072)
-            ).digest()
-
-        slot = (
-            int.from_bytes(
-                digest[:4],
-                "big",
-            ) % 100
+    if (
+        isinstance(uncertainties, list)
+        and any(
+            _proof(s)
+            for s in uncertainties[:5]
         )
+    ):
+        review.append("uncertainty")
 
-        if slot < CLEAN_SAMPLE_PERCENT:
-            return {
-                "scale",
-                "speech",
-                "match",
-                "visual",
-                "mirror",
-            }
+    return (
+        fail,
+        list(dict.fromkeys(review)),
+    )
 
-    return set()
-
-
-# ==========================================
-# MAIN
-# ==========================================
 
 def inspect(
     path,
@@ -1341,381 +1235,360 @@ def inspect(
     thumbnail,
     reference="",
 ):
+    """
+    Compatible with the existing queue signature.
+    JSON reference is intentionally ignored.
+    """
     started = time.perf_counter()
 
-    path = Path(path)
-    thumbnail = Path(thumbnail)
+    video = Path(path)
+    thumb = Path(thumbnail)
 
-    duration, has_audio = _probe(path)
+    duration, has_audio = _probe(video)
     fps = FPS.get(mode, 2)
 
-    reference = _text(
-        reference, 1300
-    )
-
     with tempfile.TemporaryDirectory(
-        prefix="qc39_"
-    ) as temp:
-        folder = Path(temp)
+        prefix="qc391_"
+    ) as td:
+        folder = Path(td)
 
         frames = _extract(
-            path,
+            video,
             folder / "frames",
             fps,
         )
 
         sheets = _sheets(
-            frames,
-            fps,
-            folder,
+            frames, fps, folder
         )
 
         indices = sorted({
             round(
-                (len(frames) - 1) * position
+                (len(frames) - 1) * i
             )
-            for position in (
-                0.08,
-                0.5,
-                0.92,
+            for i in (
+                0.1, 0.5, 0.9
             )
         })
 
-        detail = [
-            (
-                i / fps,
-                frames[i],
-            )
+        details = [
+            (i / fps, frames[i])
             for i in indices
         ]
 
-        thumbnail.parent.mkdir(
+        thumb.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        if not thumbnail.is_file():
+        if not thumb.exists():
             with Image.open(
                 frames[0]
-            ) as image:
-                small = ImageOps.contain(
-                    image.convert("RGB"),
+            ) as raw:
+                ImageOps.contain(
+                    raw.convert("RGB"),
                     (320, 320),
-                )
-
-                small.save(
-                    thumbnail,
+                ).save(
+                    thumb,
                     "JPEG",
-                    quality=72,
+                    quality=73,
                 )
 
         wav = _audio(
-            path,
+            video,
             folder,
             has_audio,
         )
 
-        prepared_at = time.perf_counter()
+        prepared = time.perf_counter()
 
         # FIRST PASS
-
         first = _api(
             key,
             model,
             _parts(
                 FIRST_PROMPT,
-                reference,
                 duration,
                 sheets,
-                detail,
+                details,
                 wav,
             ),
-            3300,
+            3100,
         )
 
-        first_at = time.perf_counter()
+        first_end = time.perf_counter()
 
-        initial_fail, initial_needs = _judge(
-            first,
-            duration,
-            reference,
+        fails, risks = _judge(
+            first, duration
         )
 
         second = None
         focus = set()
 
-        final_fail = initial_fail
-        pending = list(initial_needs)
+        final_fails = fails[:]
+        pending = risks[:]
 
-        # SECOND PASS ONLY WHEN NEEDED
+        # SECOND PASS ONLY FOR RISKS
+        if not fails and risks:
+            focus = {
+                r for r in risks
+                if r in {
+                    "scale",
+                    "speech",
+                    "match",
+                    "visual",
+                    "mirror",
+                }
+            }
 
-        if not initial_fail:
-            focus = _audit_focus(
-                initial_needs,
-                path,
+            if (
+                "uncertainty" in risks
+                and not focus
+            ):
+                focus = {
+                    "scale", "match"
+                }
+
+            image_needed = bool(
+                focus & {
+                    "scale",
+                    "match",
+                    "visual",
+                    "mirror",
+                }
             )
 
-            if focus:
-                image_focus = bool(
-                    focus & {
-                        "scale",
-                        "match",
-                        "visual",
-                        "mirror",
-                    }
+            audio_needed = bool(
+                focus & {
+                    "speech", "match"
+                }
+            )
+
+            if "mirror" in focus:
+                chosen = sheets
+            else:
+                step = max(
+                    1,
+                    len(sheets) // 3,
                 )
 
-                audio_focus = (
-                    "speech" in focus
-                    or "match" in focus
+                chosen = sheets[::step][:3]
+
+            second = _api(
+                key,
+                model,
+                _parts(
+                    (
+                        SECOND_PROMPT
+                        + "\nจุดที่ต้องตรวจ: "
+                        + ", ".join(sorted(focus))
+                    ),
+                    duration,
+                    (
+                        chosen
+                        if image_needed
+                        else []
+                    ),
+                    (
+                        details
+                        if "mirror" in focus
+                        else (
+                            details[:2]
+                            if image_needed
+                            else []
+                        )
+                    ),
+                    (
+                        wav
+                        if audio_needed
+                        else None
+                    ),
+                ),
+                2600,
+            )
+
+            final_fails, newer_risks = _judge(
+                second,
+                duration,
+                focus,
+            )
+
+            pending = list(newer_risks)
+
+            # Do not silently erase
+            # a well-evidenced concern.
+            for area in focus:
+                block = first.get(
+                    area, {}
                 )
-
-                if "mirror" in focus:
-                    chosen_sheets = sheets
-
-                else:
-                    step = max(
-                        1,
-                        len(sheets) // 3,
-                    )
-
-                    chosen_sheets = (
-                        sheets[::step][:3]
-                    )
 
                 if (
-                    "scale" in focus
-                    or "mirror" in focus
+                    _status(block) == "REVIEW"
+                    and _status(
+                        second.get(area, {})
+                    ) == "PASS"
                 ):
-                    chosen_details = detail
+                    if (
+                        area in ("scale", "visual")
+                        and _events(block, duration)
+                    ):
+                        pending.append(area)
 
-                else:
-                    chosen_details = detail[:1]
+                    if (
+                        area == "mirror"
+                        and _mirror_events(
+                            block, duration
+                        )
+                    ):
+                        pending.append(area)
 
-                instruction = (
-                    AUDIT_PROMPT
-                    + "\nตรวจเฉพาะด้าน: "
-                    + ", ".join(sorted(focus))
-                )
+            pending = list(
+                dict.fromkeys(pending)
+            )
 
-                second = _api(
-                    key,
-                    model,
-                    _parts(
-                        instruction,
-                        reference,
-                        duration,
-                        (
-                            chosen_sheets
-                            if image_focus
-                            else []
-                        ),
-                        (
-                            chosen_details
-                            if image_focus
-                            else []
-                        ),
-                        (
-                            wav
-                            if audio_focus
-                            else None
-                        ),
-                    ),
-                    2900,
-                )
-
-                final_fail, pending = _judge(
-                    second,
-                    duration,
-                    reference,
-                    scope=focus,
-                )
-
-                unresolved = set(pending)
-
-                for name in initial_needs:
-                    if name not in focus:
-                        unresolved.add(name)
-                        continue
-
-                    second_status = _status(
-                        second.get(name, {})
-                    )
-
-                    if second_status == "REVIEW":
-                        unresolved.add(name)
-
-                pending = sorted(unresolved)
-
-        if final_fail:
+        if final_fails:
             decision = "FAIL"
-
         elif pending:
             decision = "REVIEW"
-
         else:
             decision = "PASS"
 
-        reasons = [
-            issue[2]
-            for issue in final_fail
-        ]
+        if final_fails:
+            reason = "; ".join(
+                x[2]
+                for x in final_fails[:3]
+            )
 
-        if not reasons and pending:
-            reasons = [
+        elif pending:
+            reason = (
                 "รอตรวจด้วยคน: "
+                "ยังไม่ยืนยันประเด็น "
                 + ", ".join(pending)
-                + " ยังไม่มีหลักฐานให้อนุมัติ"
-                "หรือปฏิเสธแน่นอน"
-            ]
+            )
 
-        if not reasons:
-            reasons = [
+        else:
+            reason = (
                 _text(
                     first.get("summary_th"),
                     700,
                 )
-                or "ไม่พบข้อผิดพลาดสำคัญตามภาพและเสียง"
-            ]
-
-        issues = [
-            {
-                "category": category,
-                "time_sec": round(sec, 2),
-                "detail_th": why,
-                "severity": "critical",
-            }
-            for category, sec, why
-            in final_fail
-        ]
-
-        if pending and not final_fail:
-            issues.append({
-                "category": "human_review",
-                "time_sec": 0,
-                "detail_th": reasons[0],
-                "severity": "warning",
-            })
+                or (
+                    "ไม่พบข้อผิดพลาดสำคัญ"
+                    "จากภาพและเสียง"
+                )
+            )
 
         source = (
             second
-            if second and final_fail
+            if final_fails and second
             else first
         )
 
         ended = time.perf_counter()
 
+        issues = [
+            {
+                "category": cat,
+                "time_sec": round(t, 2),
+                "detail_th": why,
+                "severity": "critical",
+            }
+            for cat, t, why
+            in final_fails
+        ]
+
+        if decision == "REVIEW":
+            issues.append({
+                "category": "human_review",
+                "time_sec": 0,
+                "detail_th": reason,
+                "severity": "warning",
+            })
+
         return {
             "decision": decision,
-
-            "reason_th": (
-                "; ".join(reasons)[:850]
-            ),
-
-            "video_type": (
-                _text(
-                    source.get("video_type"),
-                    30,
-                ).upper()
-                or "PRODUCT"
-            ),
-
-            "product_name_th": _text(
-                source.get("visible_product_th"),
-                180,
-            ),
+            "reason_th": reason[:850],
 
             "product_type_th": _text(
                 source.get("product_type_th"),
-                180,
+                160,
+            ),
+
+            "product_name_th": _text(
+                source.get("product_seen_th"),
+                160,
             ),
 
             "spoken_product_th": _text(
-                source.get("spoken_product_th"),
-                180,
+                source.get("product_spoken_th"),
+                160,
             ),
 
             "speech_summary_th": _text(
                 first.get("speech_summary_th"),
-                700,
+                650,
             ),
 
+            "video_type": "PRODUCT",
             "scale_review": source["scale"],
             "audio_review": source["speech"],
             "match_review": source["match"],
             "visual_review": source["visual"],
             "mirror_review": source["mirror"],
 
-            "first_scale_review": first["scale"],
-            "first_audio_review": first["speech"],
-
             "scale_audit": (
-                second["scale"]
+                second.get("scale")
                 if second else None
             ),
 
             "speech_audit": (
-                second["speech"]
-                if second else None
-            ),
-
-            "match_audit": (
-                second["match"]
+                second.get("speech")
                 if second else None
             ),
 
             "mirror_audit": (
-                second["mirror"]
+                second.get("mirror")
                 if second else None
             ),
 
             "issues": issues,
+
+            "review_required": (
+                decision == "REVIEW"
+            ),
 
             "audit_done": (
                 second is not None
             ),
 
             "audit_trigger": (
-                ", ".join(sorted(focus))
-                if focus else "none"
+                ",".join(sorted(focus))
+                or "none"
             ),
 
-            "review_required": (
-                decision == "REVIEW"
-            ),
-
-            "product_reference_used": bool(
-                reference
-            ),
-
-            "duration": round(
-                duration, 2
-            ),
-
+            "product_reference_used": False,
+            "duration": round(duration, 2),
             "elapsed": round(
-                ended - started,
-                2,
+                ended - started, 2
             ),
+
+            "engine": ENGINE_VERSION,
 
             "timings": {
                 "prepare_seconds": round(
-                    prepared_at - started,
-                    2,
+                    prepared - started, 2
                 ),
 
                 "first_api_seconds": round(
-                    first_at - prepared_at,
-                    2,
+                    first_end - prepared, 2
                 ),
 
                 "audit_api_seconds": (
                     round(
-                        ended - first_at,
-                        2,
+                        ended - first_end, 2
                     )
-                    if second else 0
+                    if second
+                    else 0.0
                 ),
             },
-
-            "engine": ENGINE_VERSION,
         }
