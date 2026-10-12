@@ -1,9 +1,5 @@
 
-"""AI Video QC V3.9 Hybrid Streamlit App.
-
-Upload MP4 only or MP4 + optional JSON.
-Includes PASS, FAIL, REVIEW, CSV and ZIP exports.
-"""
+"""V3.9.1 Streamlit MP4-only bulk video QC dashboard."""
 
 from __future__ import annotations
 
@@ -22,32 +18,29 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from bulk_upload import ChunkReceiver
-from qc_core import ALLOWED_MODELS, ENGINE_VERSION
+
+from qc_core import (
+    ENGINE_VERSION,
+    MODELS,
+    DEFAULT_MODEL,
+    available_models,
+    AnalysisError,
+)
+
 from qc_store import (
+    ActiveQueue,
     EXPORTS,
     MAX_ACTIVE_BYTES,
     MAX_VIDEOS,
-    ActiveQueue,
 )
 
 
 st.set_page_config(
-    page_title="AI Video QC V3.9",
+    page_title="Video QC V3.9.1",
     page_icon="🎬",
     layout="wide",
 )
 
-uploader = components.declare_component(
-    "bulk_json_mp4_one_drop",
-    path=str(
-        Path(__file__).parent / "bulk_uploader"
-    ),
-)
-
-
-# ==========================================
-# SECRETS / LOGIN
-# ==========================================
 
 def secret(name):
     try:
@@ -68,19 +61,26 @@ def secret(name):
 password = secret("APP_PASSWORD")
 api_key = secret("GEMINI_API_KEY")
 
+
+# ==========================================
+# LOGIN
+# ==========================================
+
 if not password:
     st.error(
-        "ตั้ง APP_PASSWORD "
-        "ใน Streamlit Cloud Secrets ก่อน"
+        "กรุณาตั้ง APP_PASSWORD "
+        "ใน Streamlit Secrets"
     )
-
     st.stop()
 
+
 if not st.session_state.get("authorized"):
-    st.title("🔐 AI Video QC")
+    st.title(
+        "🔐 Video QC V3.9.1"
+    )
 
     entry = st.text_input(
-        "รหัสผ่าน",
+        "รหัสผ่านเว็บ",
         type="password",
     )
 
@@ -104,7 +104,7 @@ if not st.session_state.get("authorized"):
 
 
 # ==========================================
-# QUEUE SERVICE
+# QUEUE
 # ==========================================
 
 @st.cache_resource
@@ -112,7 +112,9 @@ def get_service(version):
     return ActiveQueue(api_key)
 
 
-service = get_service("hybrid-v39")
+service = get_service(
+    "qc391-mp4-only"
+)
 
 service.update_key(api_key)
 
@@ -122,31 +124,43 @@ def get_receiver(version):
     return ChunkReceiver(service)
 
 
-receiver = get_receiver("chunk-v39")
+receiver = get_receiver(
+    "qc391-mp4-chunks"
+)
 
 
-# ==========================================
-# CSV
-# ==========================================
+bulk = components.declare_component(
+    "bulk_mp4_only_v391",
+    path=str(
+        Path(__file__).parent
+        / "bulk_uploader"
+    ),
+)
 
-def make_csv(rows):
-    buffer = io.StringIO()
 
-    writer = csv.writer(buffer)
+@st.cache_data(
+    ttl=1800,
+    show_spinner=False,
+)
+def model_choices(key):
+    return available_models(key)
+
+
+def report_csv(rows):
+    output = io.StringIO()
+    writer = csv.writer(output)
 
     writer.writerow([
-        "video_filename",
-        "json_filename",
-        "product_title",
-        "json_used",
+        "filename",
         "status",
         "decision",
         "product_type",
         "reason",
-        "speech_summary",
+        "speech",
         "seconds",
-        "recheck",
-        "review_required",
+        "model",
+        "second_ai_call",
+        "engine",
         "error",
     ])
 
@@ -158,38 +172,33 @@ def make_csv(rows):
             )
 
         except (
-            ValueError,
             TypeError,
+            ValueError,
         ):
             details = {}
 
         writer.writerow([
             row["filename"],
-            row.get("matched_json") or "",
-            row.get("product_title") or "",
-            details.get(
-                "product_reference_used", ""
-            ),
-            row.get("status"),
+            row["status"],
             row.get("verdict") or "",
-            details.get(
-                "product_type_th"
-            ) or row.get("category") or "",
+            (
+                details.get("product_type_th")
+                or row.get("category")
+                or ""
+            ),
             row.get("reason") or "",
-            details.get(
-                "speech_summary_th"
-            ) or "",
+            (
+                details.get("speech_summary_th")
+                or ""
+            ),
             row.get("elapsed") or "",
-            details.get(
-                "audit_done", ""
-            ),
-            details.get(
-                "review_required", ""
-            ),
+            row.get("model") or "",
+            details.get("audit_done") or False,
+            details.get("engine") or "",
             row.get("error") or "",
         ])
 
-    return buffer.getvalue().encode(
+    return output.getvalue().encode(
         "utf-8-sig"
     )
 
@@ -199,36 +208,69 @@ def make_csv(rows):
 # ==========================================
 
 with st.sidebar:
-    st.header("⚙️ การตรวจ")
+    st.header(
+        "⚙️ ตั้งค่าตรวจ"
+    )
 
     mode = st.selectbox(
-        "คุณภาพการดึงภาพ",
+        "ความละเอียดของภาพ",
         ["Balanced", "Fast", "Deep"],
     )
 
-    models = sorted(ALLOWED_MODELS)
+    try:
+        found_models = (
+            model_choices(api_key)
+            if api_key
+            else []
+        )
 
-    preferred = "gemini-2.5-flash-lite"
+    except AnalysisError as exc:
+        found_models = []
+
+        st.warning(
+            str(exc)[:200]
+        )
+
+    if found_models:
+        options = found_models
+
+        st.caption(
+            "โมเดลที่ Google แจ้งว่า "
+            "API Key นี้เข้าถึงได้"
+        )
+
+    else:
+        options = list(MODELS)
+
+        st.caption(
+            "ตรวจสอบสิทธิ์โมเดลไม่ได้ "
+            "เลือกจากรายการทางการ"
+        )
 
     model = st.selectbox(
-        "Gemini API model",
-        models,
+        "Gemini model",
+        options,
         index=(
-            models.index(preferred)
-            if preferred in models
+            options.index(DEFAULT_MODEL)
+            if DEFAULT_MODEL in options
             else 0
         ),
     )
 
     auto_start = st.checkbox(
-        "เริ่มตรวจเมื่อ MP4 อัปโหลดเสร็จ",
+        "เริ่มตรวจเมื่ออัปโหลด MP4 เสร็จ",
         value=True,
     )
 
-    st.caption(
-        "JSON ไม่บังคับ "
-        "หากมีจะใช้เพิ่มข้อมูลตรวจสอบ"
-    )
+    if st.button(
+        "🔁 ใช้โมเดลนี้กับคลิปที่รอ/ผิดพลาด",
+        use_container_width=True,
+    ):
+        service.set_model(model)
+
+        st.success(
+            "เปลี่ยนโมเดลในคิวเรียบร้อย"
+        )
 
     if st.button(
         "▶️ เริ่ม / ทำงานต่อ",
@@ -238,10 +280,17 @@ with st.sidebar:
         service.start()
 
     if st.button(
-        "⏸️ พักคิว",
+        "⏸️ พักหลังจบคลิปปัจจุบัน",
         use_container_width=True,
     ):
         service.pause()
+
+    if st.button(
+        "🔍 ตรวจสิทธิ์โมเดลใหม่",
+        use_container_width=True,
+    ):
+        model_choices.clear()
+        st.rerun()
 
     st.caption(
         f"ดิสก์ว่าง "
@@ -254,99 +303,52 @@ with st.sidebar:
 # ==========================================
 
 st.title(
-    "🎬 AI Video QC V3.9 — Hybrid Quality"
+    "🎬 AI Video QC V3.9.1 — MP4 Only"
 )
 
 st.caption(
-    "MP4 อย่างเดียว หรือ MP4 + JSON • "
-    "ตรวจสินค้า ภาพ เสียง และความสอดคล้อง • "
+    "ไม่ใช้ JSON • ประเมินสเกล เสียงพูด "
+    "คำพูดตรงภาพ รูปทรง มือและกระจก • "
     "PASS / FAIL / REVIEW"
 )
 
 if not api_key:
-    st.warning(
-        "ไม่พบ GEMINI_API_KEY: "
-        "อัปโหลดได้ แต่ยังตรวจไม่ได้"
+    st.error(
+        "ยังไม่ได้ตั้ง GEMINI_API_KEY "
+        "ใน Streamlit Secrets"
     )
 
-count, used, refs = service.stats()
-rows = service.jobs()
 
-matched = sum(
-    bool(row.get("matched_json"))
-    for row in rows
+count, used, _ = service.stats()
+
+metric1, metric2, metric3 = st.columns(3)
+
+metric1.metric(
+    "MP4", count
 )
 
-columns = st.columns(4)
-
-metrics = [
-    ("MP4", count),
-    ("JSON", refs),
-    ("MP4 มี JSON", matched),
+metric2.metric(
+    "พื้นที่คลิป",
     (
-        "พื้นที่ MB",
         f"{used / 1024**2:.0f}/"
-        f"{MAX_ACTIVE_BYTES / 1024**2:.0f}",
+        f"{MAX_ACTIVE_BYTES / 1024**2:.0f} MB"
     ),
-]
+)
 
-for col, (heading, value) in zip(
-    columns,
-    metrics,
-):
-    col.metric(heading, value)
+metric3.metric(
+    "โหมด", mode
+)
 
 st.progress(
     min(
-        1.0,
         used / MAX_ACTIVE_BYTES,
+        1.0,
     ),
     text=(
         f"สูงสุด {MAX_VIDEOS} คลิปต่อรอบ "
-        "(ขึ้นกับดิสก์จริง)"
+        "ตามพื้นที่จริงของเซิร์ฟเวอร์"
     ),
 )
-
-
-# ==========================================
-# OLD ENGINE WARNING
-# ==========================================
-
-old = []
-
-for row in rows:
-    if (
-        row["status"] == "DONE"
-        and row.get("details")
-    ):
-        try:
-            report = json.loads(
-                row["details"]
-            )
-
-            if (
-                report.get("engine")
-                != ENGINE_VERSION
-            ):
-                old.append(
-                    row["filename"]
-                )
-
-        except (
-            ValueError,
-            TypeError,
-        ):
-            old.append(
-                row["filename"]
-            )
-
-if old:
-    st.warning(
-        f"มีผลตรวจจากเวอร์ชันเก่า "
-        f"{len(old)} คลิป "
-        "กรุณาดาวน์โหลดแล้วล้างรอบ "
-        "ก่อนทดสอบ V3.9"
-    )
 
 
 # ==========================================
@@ -354,21 +356,12 @@ if old:
 # ==========================================
 
 st.subheader(
-    "① อัปโหลด MP4 (JSON เป็นทางเลือก)"
+    "① ลากหรือเลือก MP4 หลายไฟล์ในครั้งเดียว"
 )
 
 st.info(
-    "ลาก MP4 1–150 ไฟล์ได้โดยไม่มี JSON "
-    "หรือเลือก MP4 + JSON พร้อมกันก็ได้ "
-    "ระบบคัด JSON ก่อน MP4 ให้อัตโนมัติ "
-    "หากเพิ่ม JSON ทีหลังจะตรวจคลิปนั้นใหม่"
-)
-
-st.caption(
-    "ชื่อวิดีโอต้องตรงกับ video_filename "
-    "ของ JSON เมื่อมี JSON • "
-    "เปิดหน้าเว็บไว้จนส่งไฟล์เสร็จ • "
-    "MP4 ไม่เกิน 50 MB ต่อไฟล์"
+    "ไม่ต้องเตรียม JSON ระบบอ่านภาพและเสียง "
+    "จากคลิปโดยตรง เปิดหน้าเว็บนี้ไว้ระหว่างอัปโหลด"
 )
 
 if "bulk_nonce" not in st.session_state:
@@ -383,10 +376,10 @@ if "bulk_last_id" not in st.session_state:
     st.session_state.bulk_last_id = ""
 
 
-event = uploader(
+event = bulk(
     nonce=st.session_state.bulk_nonce,
     ack=st.session_state.bulk_ack,
-    key="bulk_json_mp4_input",
+    key="bulk_mp4_input_v391",
     default=None,
 )
 
@@ -401,7 +394,7 @@ if isinstance(event, dict):
         != st.session_state.bulk_last_id
     ):
         try:
-            response = receiver.handle(
+            answer = receiver.handle(
                 event,
                 session_id=st.session_state.bulk_nonce,
                 mode=mode,
@@ -411,149 +404,139 @@ if isinstance(event, dict):
                 ),
             )
 
-            acknowledgement = {
+            ack = {
                 "id": event_id,
-                **response,
+                **answer,
             }
 
         except Exception as exc:
-            acknowledgement = {
+            ack = {
                 "id": event_id,
                 "ok": False,
                 "message": str(exc)[:450],
             }
 
-        st.session_state.bulk_last_id = event_id
-
-        st.session_state.bulk_ack = (
-            acknowledgement
+        st.session_state.bulk_last_id = (
+            event_id
         )
+
+        st.session_state.bulk_ack = ack
 
         st.rerun()
-
-
-unmatched = service.unmatched_references()
-
-if unmatched:
-    with st.expander(
-        f"มี JSON {len(unmatched)} ไฟล์ "
-        "ที่ยังไม่มี MP4 ตรงกัน"
-    ):
-        st.dataframe(
-            unmatched,
-            hide_index=True,
-            use_container_width=True,
-        )
 
 
 # ==========================================
 # RESULTS
 # ==========================================
 
-@st.fragment(run_every="4s")
-def results_ui():
-    current = service.jobs()
-
-    counts = {
-        tag: sum(
-            row.get("verdict") == tag
-            for row in current
-        )
-        for tag in (
-            "PASS",
-            "FAIL",
-            "REVIEW",
-        )
-    }
+@st.fragment(run_every="5s")
+def results_panel():
+    rows = service.jobs()
 
     done = sum(
-        row["status"] == "DONE"
-        for row in current
+        x["status"] == "DONE"
+        for x in rows
     )
 
-    blocked = sum(
-        row["status"] in (
-            "ERROR",
-            "WAITING",
+    passed = sum(
+        x.get("verdict") == "PASS"
+        for x in rows
+    )
+
+    failed = sum(
+        x.get("verdict") == "FAIL"
+        for x in rows
+    )
+
+    reviews = sum(
+        x.get("verdict") == "REVIEW"
+        for x in rows
+    )
+
+    errors = sum(
+        x["status"] in (
+            "ERROR", "WAITING"
         )
-        for row in current
+        for x in rows
     )
 
     st.divider()
-
     st.subheader("② ผลตรวจ")
 
-    cols = st.columns(5)
+    cols = st.columns(6)
 
-    titles = [
-        "คลิปทั้งหมด",
-        "ตรวจแล้ว",
+    titles = (
+        "ทั้งหมด",
+        "เสร็จ",
         "✅ PASS",
         "❌ FAIL",
-        "👁️ REVIEW",
-    ]
+        "👁 REVIEW",
+        "⚠ ERROR/โควตา",
+    )
 
-    values = [
-        len(current),
+    values = (
+        len(rows),
         done,
-        counts["PASS"],
-        counts["FAIL"],
-        counts["REVIEW"],
-    ]
+        passed,
+        failed,
+        reviews,
+        errors,
+    )
 
     for col, title, value in zip(
         cols,
         titles,
         values,
     ):
-        col.metric(title, value)
+        col.metric(
+            title, value
+        )
 
     st.progress(
         (
-            done / len(current)
-            if current else 0
+            done / len(rows)
+            if rows
+            else 0
         ),
         text=(
-            f"ตรวจแล้ว {done}/{len(current)} "
-            f"• ติดขัด {blocked}"
+            f"ตรวจแล้ว {done}/{len(rows)} คลิป"
         ),
     )
 
-    if counts["REVIEW"]:
-        st.warning(
-            f"มี {counts['REVIEW']} คลิป "
-            "รอตรวจด้วยคน "
-            "อย่าเผยแพร่ก่อนตรวจยืนยัน"
-        )
-
-    if blocked:
+    if errors:
         st.error(
-            f"มี {blocked} คลิป "
-            "ERROR/รอโควตา "
-            "ไม่ใช่คุณภาพ FAIL"
+            f"มี {errors} คลิปตรวจไม่สำเร็จ "
+            "(ไม่ใช่ผล FAIL)"
         )
 
         if st.button(
-            "🔄 ลองตรวจคลิปติดขัดใหม่",
+            "🔄 ตรวจคลิปที่ ERROR อีกครั้ง "
+            "โดยใช้โมเดลที่เลือก",
             disabled=not api_key,
         ):
-            service.retry()
+            service.retry(model)
             st.rerun()
 
-    if not current:
+    if reviews:
+        st.warning(
+            f"มี {reviews} คลิปต้องตรวจด้วยคน "
+            "ก่อนเผยแพร่"
+        )
+
+    if not rows:
         return
 
     # ======================================
-    # FILTER TABLE
+    # FILTER
     # ======================================
 
     query = st.text_input(
-        "ค้นหาคลิป",
-        placeholder="ชื่อ MP4 หรือชื่อสินค้า",
+        "ค้นหาชื่อ MP4 หรือประเภทสินค้า",
+        key="qc_search",
     )
 
-    status_filter = st.radio(
-        "ตัวกรอง",
+    selected_filter = st.radio(
+        "กรองผล",
         [
             "ทั้งหมด",
             "PASS",
@@ -563,104 +546,107 @@ def results_ui():
             "ERROR",
         ],
         horizontal=True,
+        key="qc_filter",
     )
 
-    selected = []
+    filtered = []
 
-    for row in current:
+    for r in rows:
         searchable = (
-            row["filename"]
+            r["filename"]
             + " "
-            + (
-                row.get("product_title")
-                or ""
-            )
+            + str(r.get("category") or "")
         ).casefold()
 
         if query.casefold() not in searchable:
             continue
 
         if (
-            status_filter in (
+            selected_filter in (
                 "PASS",
                 "FAIL",
                 "REVIEW",
             )
-            and row["verdict"] != status_filter
+            and r.get("verdict")
+            != selected_filter
         ):
             continue
 
         if (
-            status_filter == "กำลังตรวจ"
-            and row["status"]
-            not in ("QUEUED", "RUNNING")
+            selected_filter == "กำลังตรวจ"
+            and r["status"]
+            not in (
+                "RUNNING",
+                "QUEUED",
+            )
         ):
             continue
 
         if (
-            status_filter == "ERROR"
-            and row["status"]
-            not in ("ERROR", "WAITING")
+            selected_filter == "ERROR"
+            and r["status"]
+            not in (
+                "ERROR",
+                "WAITING",
+            )
         ):
             continue
 
-        selected.append(row)
+        filtered.append(r)
 
     st.dataframe(
         [
             {
-                "วิดีโอ": row["filename"],
-                "JSON": (
-                    row.get("matched_json")
-                    or "ไม่ใช้"
-                ),
-                "สินค้า (JSON)": (
-                    row.get("product_title")
-                    or "—"
-                ),
+                "MP4": r["filename"],
                 "ผล": (
-                    row.get("verdict")
-                    or row["status"]
+                    r.get("verdict")
+                    or r["status"]
+                ),
+                "สินค้า": (
+                    r.get("category")
+                    or "—"
                 ),
                 "เหตุผล": (
-                    row.get("reason")
-                    or row.get("error")
+                    r.get("reason")
+                    or r.get("error")
                     or "—"
                 ),
-                "วินาที": (
-                    row.get("elapsed")
-                    or 0
+                "เวลา(s)": round(
+                    float(
+                        r.get("elapsed") or 0
+                    ),
+                    2,
                 ),
             }
-            for row in selected
+            for r in filtered
         ],
-        hide_index=True,
         use_container_width=True,
+        hide_index=True,
     )
 
     # ======================================
-    # VIDEO DETAIL
+    # DETAIL
     # ======================================
 
-    if selected:
+    if filtered:
         choices = {
             (
-                f"{row['filename']} "
-                f"[{row['id'][:6]}]"
-            ): row
-            for row in selected
+                f"{r['filename']} "
+                f"[{r['id'][:6]}]"
+            ): r
+            for r in filtered
         }
 
-        chosen_label = st.selectbox(
-            "ดูรายละเอียดคลิป",
+        name = st.selectbox(
+            "ดูวิดีโอและหลักฐานการตรวจ",
             list(choices),
+            key="qc_detail_select",
         )
 
-        row = choices[chosen_label]
+        row = choices[name]
 
         with st.expander(
-            "▶️ ภาพ / เสียง / "
-            "เหตุผล / หลักฐานละเอียด"
+            "▶️ เปิดคลิป / ผลตรวจแบบละเอียด"
         ):
             if Path(
                 row["path"]
@@ -670,62 +656,49 @@ def results_ui():
                 )
 
             st.write(
-                "**JSON:**",
-                row.get("matched_json")
-                or "ไม่มี JSON",
-            )
-
-            st.write(
                 "**เหตุผล:**",
-                row.get("reason")
-                or row.get("error")
-                or "รอประมวลผล",
+                (
+                    row.get("reason")
+                    or row.get("error")
+                    or "รอประมวลผล"
+                ),
             )
-
-            if row.get(
-                "product_reference"
-            ):
-                st.text(
-                    row["product_reference"]
-                )
 
             if row.get("details"):
                 try:
-                    details = json.loads(
+                    detail = json.loads(
                         row["details"]
                     )
 
                     st.write(
-                        "**ประเภทสินค้าจากภาพ:**",
-                        details.get(
-                            "product_type_th"
+                        "**สินค้าที่ตรวจพบ:**",
+                        detail.get(
+                            "product_type_th", ""
                         ),
                     )
 
                     st.write(
-                        "**สรุปคำพูด:**",
-                        details.get(
-                            "speech_summary_th"
+                        "**คำพูดโดยสรุป:**",
+                        detail.get(
+                            "speech_summary_th", ""
                         ),
                     )
 
-                    fields = (
-                        "scale_review",
-                        "audio_review",
-                        "match_review",
-                        "visual_review",
-                        "mirror_review",
-                        "scale_audit",
-                        "speech_audit",
-                        "match_audit",
-                        "mirror_audit",
-                        "review_required",
-                        "timings",
-                    )
-
                     st.json({
-                        name: details.get(name)
-                        for name in fields
+                        k: detail.get(k)
+                        for k in (
+                            "scale_review",
+                            "audio_review",
+                            "match_review",
+                            "visual_review",
+                            "mirror_review",
+                            "scale_audit",
+                            "speech_audit",
+                            "mirror_audit",
+                            "issues",
+                            "timings",
+                            "engine",
+                        )
                     })
 
                 except (
@@ -733,42 +706,40 @@ def results_ui():
                     TypeError,
                 ):
                     st.warning(
-                        "อ่านรายละเอียดไม่ได้"
+                        "อ่านรายละเอียดผลตรวจไม่ได้"
                     )
 
     # ======================================
-    # CSV EXPORT
+    # CSV
     # ======================================
 
     st.download_button(
-        "📄 ดาวน์โหลดรายงาน CSV",
-        make_csv(current),
-        file_name="qc_v39_current.csv",
+        "📄 ดาวน์โหลด CSV",
+        report_csv(rows),
+        file_name="qc_391_report.csv",
         mime="text/csv",
     )
 
     # ======================================
-    # ZIP EXPORT
+    # ZIP
     # ======================================
 
     st.markdown(
-        "**📦 ดาวน์โหลด MP4 แยก "
+        "**ดาวน์โหลด MP4 ตามกลุ่ม "
         "PASS / FAIL / REVIEW**"
     )
 
     verdict = st.selectbox(
         "กลุ่ม ZIP",
         ["PASS", "FAIL", "REVIEW"],
+        key="qc_zip_verdict",
     )
 
     eligible = [
-        row
-        for row in current
+        r for r in rows
         if (
-            row.get("verdict") == verdict
-            and Path(
-                row["path"]
-            ).is_file()
+            r.get("verdict") == verdict
+            and Path(r["path"]).is_file()
         )
     ]
 
@@ -776,96 +747,89 @@ def results_ui():
     group = []
     size = 0
 
-    for row in eligible:
+    for r in eligible:
         if (
             group
-            and size + row["size"]
-            > 30 * 1024**2
+            and (
+                size + r["size"]
+                > 35 * 1024**2
+            )
         ):
             groups.append(group)
             group = []
             size = 0
 
-        group.append(row)
-        size += row["size"]
+        group.append(r)
+        size += r["size"]
 
     if group:
         groups.append(group)
 
     if groups:
         index = st.selectbox(
-            "ชุดไฟล์ ZIP",
+            "แบ่ง ZIP ตามขนาด",
             range(len(groups)),
             format_func=lambda n: (
                 f"ชุด {n + 1}/{len(groups)} "
                 f"({len(groups[n])} คลิป)"
             ),
+            key="qc_zip_index",
         )
 
-        fingerprint = hashlib.sha256(
-            "|".join(
-                row["id"]
-                for row in groups[index]
+        identity = hashlib.sha256(
+            (
+                verdict
+                + "|"
+                + "|".join(
+                    r["id"]
+                    for r in groups[index]
+                )
             ).encode()
-        ).hexdigest()[:12]
+        ).hexdigest()[:14]
+
+        dest = EXPORTS / (
+            f"qc391_{verdict}_{identity}.zip"
+        )
 
         if st.button(
-            "เตรียม ZIP ชุดที่เลือก"
+            "📦 เตรียม ZIP",
+            key="qc_zip_build",
         ):
-            destination = EXPORTS / (
-                f"v39_{verdict}_{fingerprint}.zip"
-            )
-
             with zipfile.ZipFile(
-                destination,
+                dest,
                 "w",
                 compression=zipfile.ZIP_STORED,
-            ) as archive:
-                for row in groups[index]:
-                    archive.write(
-                        row["path"],
-                        arcname=(
-                            f"{row['id'][:6]}_"
-                            f"{row['filename']}"
-                        ),
+            ) as z:
+                for r in groups[index]:
+                    z.write(
+                        r["path"],
+                        arcname=r["filename"],
                     )
 
-            st.session_state.export_ready = (
-                verdict,
-                fingerprint,
-                str(destination),
+            st.session_state.qc_export_ready = (
+                str(dest)
             )
-
-        ready = st.session_state.get(
-            "export_ready"
-        )
 
         if (
-            ready
-            and ready[:2] == (
-                verdict,
-                fingerprint,
-            )
-            and Path(
-                ready[2]
-            ).is_file()
+            st.session_state.get(
+                "qc_export_ready"
+            ) == str(dest)
+            and dest.is_file()
         ):
-            with open(
-                ready[2], "rb"
-            ) as file:
+            with dest.open("rb") as file:
                 st.download_button(
                     "⬇️ ดาวน์โหลด ZIP",
                     file,
                     file_name=(
-                        f"v39_{verdict}_"
-                        f"{index + 1}.zip"
+                        f"qc_{verdict}_{index + 1}.zip"
                     ),
                     mime="application/zip",
+                    key="qc_zip_download",
                 )
 
     else:
         st.caption(
-            "ยังไม่มีไฟล์กลุ่มนี้"
+            "ยังไม่มีผลในกลุ่มนี้"
         )
 
     # ======================================
@@ -875,21 +839,23 @@ def results_ui():
     st.divider()
 
     st.subheader(
-        "③ ล้างรอบ / เริ่มใหม่"
+        "③ ล้างข้อมูลและเริ่มรอบใหม่"
     )
 
     st.warning(
-        "ดาวน์โหลด CSV และ ZIP ก่อนล้างรอบ "
-        "ข้อมูลจะถูกลบ"
+        "ดาวน์โหลด CSV/ZIP ก่อนกดล้างรอบ: "
+        "คลิปและผลที่เก็บในเซิร์ฟเวอร์จะถูกลบ"
     )
 
-    confirm = st.checkbox(
-        "ยืนยันว่าดาวน์โหลดผลที่ต้องการแล้ว"
+    confirmed = st.checkbox(
+        "ฉันดาวน์โหลดข้อมูลที่ต้องการแล้ว",
+        key="qc_clear_confirm",
     )
 
     if st.button(
-        "🗑️ ล้างข้อมูลรอบปัจจุบัน",
-        disabled=not confirm,
+        "🗑️ ล้างรอบทั้งหมด",
+        disabled=not confirmed,
+        key="qc_clear",
     ):
         try:
             service.clear_round()
@@ -903,20 +869,23 @@ def results_ui():
             st.session_state.bulk_last_id = ""
 
             st.session_state.pop(
-                "export_ready",
+                "qc_export_ready",
                 None,
             )
 
             st.rerun()
 
         except ValueError as exc:
-            st.error(str(exc))
+            st.error(
+                str(exc)
+            )
 
 
-results_ui()
+results_panel()
 
 st.caption(
-    "จำนวน FAIL ไม่ได้ถูกบังคับ • "
-    "การวิเคราะห์ AI ยังผิดพลาดได้ • "
-    "การจัดเก็บขึ้นอยู่กับดิสก์ของ Streamlit Cloud"
+    f"รุ่นตัวตรวจ: {ENGINE_VERSION} • "
+    "ไม่มี JSON • AI อาจตรวจผิดได้ • "
+    "150 คลิปเป็นเพดานซอฟต์แวร์ "
+    "ไม่ใช่การรับประกันทรัพยากรคลาวด์"
 )
