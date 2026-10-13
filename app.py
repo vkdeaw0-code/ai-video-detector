@@ -268,13 +268,7 @@ with st.sidebar:
     st.header("ตั้งค่าการตรวจ")
     model = st.selectbox("โมเดล AI", ["gemini-3.5-flash-lite", "gemini-3.8-flash"], index=0)
     st.caption("Flash-Lite เน้นต้นทุน/ความเร็ว; Flash อาจจับรายละเอียดดีขึ้นแต่ช้าหรือมีค่าใช้จ่าย") 
-    cooldown = st.slider(
-        "พักระหว่างคลิป (วินาที)",
-        0.0,
-        30.0,
-        10.0,
-        1.0
-    )
+    cooldown = st.slider("พักระหว่างคลิป (วินาที)", 0.0, 5.0, 1.5, 0.5)
     custom_key = ""
     if not api_key():
         custom_key = st.text_input("Gemini API Key", type="password", help="แนะนำให้ตั้ง GEMINI_API_KEY ใน Streamlit Secrets")
