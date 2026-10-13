@@ -290,6 +290,47 @@ with st.sidebar:
     custom_key = ""
     if not api_key():
         custom_key = st.text_input("Gemini API Key", type="password", help="แนะนำให้ตั้ง GEMINI_API_KEY ใน Streamlit Secrets")
+    
+    if st.button("🧪 ทดสอบ Gemini API"):
+        test_key = api_key() or custom_key
+
+        if not test_key:
+            st.error("ไม่พบ Gemini API Key")
+        else:
+            try:
+                with genai.Client(
+                    api_key=test_key,
+                    http_options=types.HttpOptions(
+                        timeout=20000
+                    )
+                ) as client:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents="ตอบเพียงคำว่า OK"
+                    )
+
+                if response.text:
+                    st.success("Gemini API ใช้งานได้สำเร็จ!")
+                else:
+                    st.warning("API ตอบกลับแต่ไม่มีข้อความ")
+
+            except Exception as exc:
+                import re
+
+                code = getattr(exc, "code", None)
+
+                if code is None:
+                    match = re.search(
+                        r"\b(400|401|403|404|429|500|503|504)\b",
+                        str(exc)
+                    )
+                    code = match.group(1) if match else "UNKNOWN"
+
+                st.error(
+                    f"เชื่อมต่อ Gemini ไม่สำเร็จ: HTTP {code}"
+                )
+
+    
     common_notes = st.text_area("ข้อมูลสินค้ารวม (ไม่บังคับ)", placeholder="เช่น คลิปขายสินค้า 1 ชิ้น ต้องไม่เปลี่ยนทรงหรือจำนวน")
     st.warning("ถ้า API ใช้ไม่ได้ ระบบจะแสดง 'ไม่ผ่าน' ประเภท 'ระบบ' ไม่ได้แปลว่าคลิปเสีย")
     if st.button("🧹 ล้างผลตรวจ / แคช / ไฟล์ที่เลือก"):
