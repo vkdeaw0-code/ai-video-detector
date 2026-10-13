@@ -1,9 +1,0 @@
-
-.streamlit/secrets.toml
-__pycache__/
-*.pyc
-.venv/
-*.mp4
-*.mov
-*.webm
-*_results.csv
