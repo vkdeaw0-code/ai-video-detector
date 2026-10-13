@@ -136,8 +136,19 @@ def analyze(images, audio_path, fps: float, reference: str, model: str, key: str
         parts.append(types.Part.from_text(text="เสียงของคลิปเดียวกันตั้งแต่เริ่มจนจบ:"))
         parts.append(types.Part.from_bytes(data=audio_path.read_bytes(), mime_type="audio/wav"))
     else:
-        parts.append(types.Part.from_text(text="คลิปไม่มีแทร็กเสียง"))
-    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000)) as client:
+        parts.append(types.Part.from_text(text="คลิปไม่มีแทร็กเสียง"))   
+    with genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(
+            timeout=25000,
+            retry_options=types.HttpRetryOptions(
+                attempts=2,
+                initial_delay=2.0,
+                max_delay=5.0,
+                http_status_codes=[500, 502, 503, 504]
+            )
+        )
+    ) as client:
         resp = client.models.generate_content(
             model=model,
             contents=[types.Content(role="user", parts=parts)],
