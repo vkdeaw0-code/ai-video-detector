@@ -284,7 +284,17 @@ if "file_widget_version" not in st.session_state:
 
 with st.sidebar:
     st.header("ตั้งค่าการตรวจ")
-    model = st.selectbox("โมเดล AI", ["gemini-3.5-flash-lite", "gemini-3.8-flash"], index=0)
+    
+    model = st.selectbox(
+        "โมเดล AI",
+        [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash"
+        ],
+        index=0
+    )
+    
     st.caption("Flash-Lite เน้นต้นทุน/ความเร็ว; Flash อาจจับรายละเอียดดีขึ้นแต่ช้าหรือมีค่าใช้จ่าย") 
     cooldown = st.slider("พักระหว่างคลิป (วินาที)", 0.0, 5.0, 1.5, 0.5)
     custom_key = ""
