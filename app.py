@@ -17,7 +17,6 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 APP_VERSION = "4.1"
-MAX_FILES = 60
 MAX_TOTAL_BYTES = 1_000_000_000  # 1 GB total per selection (decimal)
 MAX_DURATION = 20.0               # optimized for ~10s videos
 ALLOWED_TYPES = ["mp4", "mov", "m4v", "mkv", "webm", "avi"]
