@@ -301,7 +301,7 @@ with st.sidebar:
                 with genai.Client(
                     api_key=test_key,
                     http_options=types.HttpOptions(
-                        timeout=20000
+                        timeout=60000
                     )
                 ) as client:
                     response = client.models.generate_content(
