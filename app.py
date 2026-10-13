@@ -158,20 +158,39 @@ def analyze(images, audio_path, fps: float, reference: str, model: str, key: str
 
 
 def safe_error(exc: Exception) -> str:
-    s = str(exc).lower()
-    if "429" in s or "resource_exhausted" in s or "quota" in s:
-        return "API เกินโควตาหรือเรียกถี่เกินไป โปรดตรวจโควตาที่ Google AI Studio"
-    if "401" in s or "403" in s or "api key" in s or "api_key" in s:
-        return "API Key ไม่ถูกต้อง ไม่มีสิทธิ์ หรือโมเดลนี้ใช้ไม่ได้กับบัญชี"
-    if "404" in s or "not found" in s:
-        return "หาโมเดล AI ไม่พบ ตรวจชื่อโมเดลหรือการเปิดใช้งาน API"
-    if "timeout" in s or "timed out" in s:
-        return "AI ตอบช้าหรือหมดเวลารอ"
-    if "503" in s or "500" in s:
-        return "บริการ AI ขัดข้องชั่วคราว"
-    if isinstance(exc, RuntimeError):
-        return str(exc)[:250]
-    return "AI หรือเครือข่ายมีข้อผิดพลาด (รายละเอียดเชิงเทคนิคไม่ถูกเปิดเผยเพื่อความปลอดภัย)"
+    import re
+
+    code = getattr(exc, "code", None)
+
+    if code is None:
+        match = re.search(
+            r"\b(400|401|402|403|404|408|429|500|502|503|504)\b",
+            str(exc)
+        )
+        code = match.group(1) if match else None
+
+    code = str(code) if code is not None else "UNKNOWN"
+
+    messages = {
+        "400": "รูปแบบคำขอ AI ไม่ถูกต้อง",
+        "401": "API Key ไม่ถูกต้อง",
+        "402": "มีปัญหาเครดิตหรือการชำระเงิน",
+        "403": "ไม่มีสิทธิ์ใช้งาน API",
+        "404": "ไม่พบโมเดลหรือ API ที่เรียก",
+        "408": "คำขอหมดเวลารอ",
+        "429": "API เกินโควตาหรือ Rate Limit",
+        "500": "เซิร์ฟเวอร์ AI เกิดข้อผิดพลาด",
+        "502": "บริการ AI ตอบกลับผิดพลาด",
+        "503": "บริการ AI ไม่พร้อมชั่วคราว",
+        "504": "บริการ AI ตอบกลับช้าเกินไป",
+    }
+
+    reason = messages.get(
+        code,
+        "ไม่สามารถระบุข้อผิดพลาดได้"
+    )
+
+    return f"HTTP {code}: {reason}"
 
 
 def run_one(upload, model: str, key: str, reference: str) -> dict:
