@@ -290,16 +290,30 @@ reference_csv = st.file_uploader(
 )
 reference_map = parse_product_csv(reference_csv)
 files = files or []
-total_bytes = sum(f.size for f in files)
-st.write(f"**จำนวน:** {len(files)} / {MAX_FILES} คลิป  |  **ขนาดรวม:** {total_bytes / 1_000_000:,.1f} MB / 1,000 MB")
-if files:
-    st.progress(min(1.0, total_bytes / MAX_TOTAL_BYTES))
 
-ready = bool(files) and len(files) <= MAX_FILES and total_bytes <= MAX_TOTAL_BYTES
-if len(files) > MAX_FILES:
-    st.error(f"เลือกได้ไม่เกิน {MAX_FILES} คลิปต่อรอบ")
+total_bytes = sum(f.size for f in files)
+
+st.write(
+    f"**จำนวนคลิป:** {len(files)} คลิป | "
+    f"**ขนาดรวม:** {total_bytes / 1_000_000:,.1f} MB / 1,000 MB"
+)
+
+if files:
+    st.progress(
+        min(1.0, total_bytes / MAX_TOTAL_BYTES)
+    )
+
+# ไม่จำกัดจำนวนคลิป
+# จำกัดเฉพาะขนาดไฟล์รวม 1 GB
+ready = (
+    bool(files)
+    and total_bytes <= MAX_TOTAL_BYTES
+)
+
 if total_bytes > MAX_TOTAL_BYTES:
-    st.error("ขนาดไฟล์รวมเกิน 1 GB กรุณาแบ่งรอบ")
+    st.error(
+        "ขนาดไฟล์รวมเกิน 1 GB กรุณาแบ่งรอบ"
+    )
 if total_bytes > 400_000_000:
     st.warning("ไฟล์รวมขนาดใหญ่: Streamlit Community Cloud อาจหน่วยความจำไม่เพียงพอ แม้ตั้งเพดาน 1 GB แล้ว")
 
