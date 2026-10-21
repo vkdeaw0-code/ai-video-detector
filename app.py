@@ -933,8 +933,8 @@ with st.sidebar:
             try:
                 with genai.Client(
                     api_key=key,
-                    http_options=types.HttpOptions(
-                        timeout=9000,
+                    http_options=types.HttpOptions(                     
+                        timeout=15000,
                         retry_options=types.HttpRetryOptions(
                             attempts=1
                         )
