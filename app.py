@@ -958,13 +958,22 @@ with st.sidebar:
                     )
 
             except Exception as ex:
-                code, label = http_message(
-                    ex
-                )
+                code = getattr(ex, "code", "UNKNOWN")
+
+                detail = str(ex)
+
+                if key:
+                    detail = detail.replace(
+                        key, "[API_KEY_HIDDEN]"
+                    )
 
                 st.error(
-                    f"ทดสอบไม่ผ่าน: "
-                    f"{label} ({code})"
+                    f"Gemini API Error: HTTP {code}"
+                )
+
+                st.code(
+                    detail[:1000],
+                    language="text"
                 )
 
     if st.button(
