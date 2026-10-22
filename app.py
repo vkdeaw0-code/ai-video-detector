@@ -1180,49 +1180,33 @@ if size > MAX_BATCH_BYTES:
 if st.button(
     "▶ เริ่มตรวจคลิป",
     type="primary",
-    disabled=(
-        not files
-        or size > MAX_BATCH_BYTES
-    )
+    disabled=(not files or size > MAX_BATCH_BYTES)
 ):
     key = gemini_key() or manual_key
 
     if not key:
-        st.error(
-            "โปรดตั้ง GEMINI_API_KEY "
-            "ใน Streamlit Secrets ก่อน"
-        )
-
+        st.error("โปรดตั้ง GEMINI_API_KEY ใน Streamlit Secrets ก่อน")
     else:
         st.session_state.results = []
-
         meter = st.progress(0)
         label = st.empty()
         preview = st.empty()
-
         transient_streak = 0
         stopped_reason = ""
 
         try:
-            # ตรวจคลิปจริง: Timeout 15 วินาที
-            # ปิด Retry เพื่อไม่ให้รอนานซ้ำ
-           with genai.Client(
-             api_key=key,
-            http_options=types.HttpOptions(
-                timeout=15000,
-                retry_options=types.HttpRetryOptions(
-                    attempts=1
+            with genai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(
+                    timeout=35000,
+                    retry_options=types.HttpRetryOptions(
+                        attempts=1
+                    )
                 )
-            )
-        ) as client:
-
-                for n, file in enumerate(
-                    files,
-                    1
-                ):
+            ) as client:
+                for n, file in enumerate(files, 1):
                     label.write(
-                        f"กำลังตรวจ {n}/{len(files)}: "
-                        f"{file.name}"
+                        f"กำลังตรวจ {n}/{len(files)}: {file.name}"
                     )
 
                     result = one_video(
@@ -1233,9 +1217,7 @@ if st.button(
                         key
                     )
 
-                    st.session_state.results.append(
-                        result
-                    )
+                    st.session_state.results.append(result)
 
                     preview.dataframe(
                         st.session_state.results,
@@ -1243,50 +1225,35 @@ if st.button(
                         hide_index=True
                     )
 
-                    meter.progress(
-                        n / len(files)
-                    )
+                    meter.progress(n / len(files))
 
-                    # ปัญหาที่ควรหยุดทันที
                     if result["รหัสระบบ"] in (
-                        "400",
-                        "401",
-                        "403",
-                        "404",
-                        "429"
+                        "400", "401", "403", "404", "429"
                     ):
                         stopped_reason = (
-                            "หยุดรอบ: API Key / "
-                            "โมเดล / โควตามีปัญหา "
+                            "หยุดรอบ: API Key / โมเดล / โควตามีปัญหา "
                             f"({result['รหัสระบบ']})"
                         )
                         break
 
-                    # นับปัญหาระบบที่ติดต่อกัน
                     if result["ประเภท"] == "ระบบ":
                         transient_streak += 1
                     else:
                         transient_streak = 0
 
-                    # หยุดเมื่อผิดพลาดสองคลิปติดกัน
                     if transient_streak >= 2:
                         stopped_reason = (
-                            "หยุดรอบ: ตรวจไม่สำเร็จ"
-                            "ติดต่อกัน 2 คลิป"
+                            "หยุดรอบ: ตรวจไม่สำเร็จติดต่อกัน 2 คลิป"
                         )
                         break
 
-                    if (
-                        n < len(files)
-                        and cooldown
-                    ):
+                    if n < len(files) and cooldown:
                         time.sleep(cooldown)
 
             if stopped_reason:
                 label.warning(
                     stopped_reason
-                    + " — ไฟล์ที่ยังไม่ได้ตรวจ"
-                    "จะไม่ถูกนับเป็นไม่ผ่าน"
+                    + " — ไฟล์ที่ยังไม่ได้ตรวจจะไม่ถูกนับเป็นไม่ผ่าน"
                 )
             else:
                 label.success(
@@ -1294,21 +1261,16 @@ if st.button(
                 )
 
         except Exception as ex:
-            code, reason, detail = http_message(
-                ex,
-                key
-            )
+            code, reason, detail = http_message(ex, key)
 
             label.error(
-                f"เริ่มระบบ AI ไม่สำเร็จ: "
-                f"{reason} ({code})"
+                f"เริ่มระบบ AI ไม่สำเร็จ: {reason} ({code})"
             )
 
             st.code(
                 detail,
                 language="text"
             )
-
 
 # =========================================================
 # 17. SHOW RESULTS
