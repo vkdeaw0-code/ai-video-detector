@@ -1206,15 +1206,15 @@ if st.button(
         try:
             # ตรวจคลิปจริง: Timeout 15 วินาที
             # ปิด Retry เพื่อไม่ให้รอนานซ้ำ
-            with genai.Client(
-                api_key=key,
-                http_options=types.HttpOptions(
-                    timeout=15000,
-                    retry_options=types.HttpRetryOptions(
-                        attempts=1
-                    )
+           with genai.Client(
+             api_key=key,
+            http_options=types.HttpOptions(
+                timeout=15000,
+                retry_options=types.HttpRetryOptions(
+                    attempts=1
                 )
-            ) as client:
+            )
+        ) as client:
 
                 for n, file in enumerate(
                     files,
